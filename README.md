@@ -194,13 +194,15 @@ When binding from the Panda Touch UI: use Klipper/direct binding, do not scan. S
 
 ```bash
 curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/docker-compose.yml
-curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/docker-compose.cc2.yml
+curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/docker-compose.cc2.yml -o docker-compose.override.yml
 curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/.env.example
 cp .env.example .env
 nano .env   # fill in Panda vars + uncomment CC2_IP, CC2_SN
 
-docker compose -f docker-compose.yml -f docker-compose.cc2.yml up -d
+docker compose up -d
 ```
+
+`docker-compose.override.yml` is automatically merged by Docker Compose — no `-f` flags needed.
 
 **Minimum `.env` for this setup:**
 

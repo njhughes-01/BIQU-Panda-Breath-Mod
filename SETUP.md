@@ -29,13 +29,15 @@ docker compose up -d
 
 ```bash
 curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/docker-compose.yml
-curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/docker-compose.cc2.yml
+curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/docker-compose.cc2.yml -o docker-compose.override.yml
 curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/.env.example
 cp .env.example .env
 nano .env        # set Panda vars + uncomment CC2_IP, CC2_SN
 
-docker compose -f docker-compose.yml -f docker-compose.cc2.yml up -d
+docker compose up -d
 ```
+
+`docker-compose.override.yml` is automatically merged by Docker Compose — no `-f` flags needed.
 
 To build from source instead of pulling from GHCR, clone the repo and add `build: { context: . }` to the services in `docker-compose.yml`.
 
@@ -56,11 +58,14 @@ If your printer is an Elegoo CC2, run the CC2 backend alongside the Panda backen
 > **LAN-only mode required** — on the CC2: **Settings → Network → LAN Only Mode → Enable**
 > Without this, the CC2's MQTT broker is not reachable.
 
-Provide `CC2_IP` and `CC2_SN` as stack environment variables or in `.env`, then start the stack:
+Download the CC2 compose override, set `CC2_IP` and `CC2_SN` in `.env`, then start the stack:
 
 ```bash
+curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/docker-compose.cc2.yml -o docker-compose.override.yml
 docker compose up -d
 ```
+
+Docker Compose automatically merges `docker-compose.override.yml` with `docker-compose.yml`.
 
 ---
 
@@ -85,7 +90,7 @@ See individual setup sections below for full configuration details.
 | `PANDA_HOST_IP` | no | _auto-detected_ | Docker host LAN IP; auto-detected from `PANDA_IP` |
 | `PANDA_WEB_PORT` | no | `8088` | Host port for browser control UI |
 
-### Additional vars for CC2 deployment (`docker-compose.cc2.yml`)
+### Additional vars for CC2 deployment (`docker-compose.override.yml`)
 
 | Variable | Required? | Default | Description |
 |----------|-----------|---------|-------------|
@@ -186,8 +191,16 @@ If unreachable, check:
 
 ### 3. Start CC2 Backend
 
+If you haven't already, download the CC2 override file:
+
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.cc2.yml up -d
+curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/docker-compose.cc2.yml -o docker-compose.override.yml
+```
+
+Then start the stack (Docker Compose merges the override automatically):
+
+```bash
+docker compose up -d
 ```
 
 ### 4. Verify Connection
@@ -230,22 +243,24 @@ In Home Assistant:
 
 ## Running the CC2 variant
 
-Start all three services together (Panda backend, web UI, and CC2 backend):
+With `docker-compose.override.yml` in the same directory as `docker-compose.yml`, Docker Compose merges them automatically. All commands are the same as the standard deployment:
+
+Start all services (Panda backend, web UI, and CC2 backend):
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.cc2.yml up -d
+docker compose up -d
 ```
 
 View logs:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.cc2.yml logs -f
+docker compose logs -f
 ```
 
 Stop all:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.cc2.yml down
+docker compose down
 ```
 
 ---
