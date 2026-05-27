@@ -1,0 +1,19 @@
+services:
+  panda_backend:
+    build: .
+    command: python3 Panda.py
+    restart: unless-stopped
+    volumes:
+      - ./panda_config.json:/app/panda_config.json:ro
+      - ./certs:/app/certs:ro
+    ports:
+      - "8883:8883"
+    env_file:
+      - .env
+
+  cc2_backend:
+    build: .
+    command: python3 cc2_connector.py
+    restart: unless-stopped
+    env_file:
+      - .env

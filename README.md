@@ -156,11 +156,59 @@ When **Slicer Priority Mode = ON**:
 
 ---
 
-# 📦 Installation
+# 🐳 Docker Deployment (Recommended)
+
+Runs the Panda backend and the Elegoo CC2 backend as separate containers.
+No Python environment setup required on the host.
+
+## Quick start
+
+```bash
+git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
+cd BIQU-Panda-Breath-Mod
+
+# Copy and fill in credentials
+cp .env.example .env
+nano .env
+
+# Fill in panda_config.json with your Panda printer details
+nano panda_config.json
+
+# Generate TLS certs for the Panda backend
+mkdir -p certs && bash cert_gen.sh
+mv cert.pem key.pem certs/
+
+# Build and start both services
+docker-compose up -d
+```
+
+See **[SETUP.md](SETUP.md)** for the full guide including Panda Touch binding,
+CC2 credentials, and Home Assistant sensor verification.
+
+### Elegoo Centauri Carbon 2 support
+
+The CC2 backend (`cc2_connector.py`) bridges the CC2's native MQTT protocol
+into Home Assistant autodiscovery sensors:
+
+| Sensor | Unit |
+|--------|------|
+| Nozzle Temperature | °C |
+| Nozzle Target | °C |
+| Bed Temperature | °C |
+| Bed Target | °C |
+| Chamber Temperature | °C |
+| Print Status | — |
+| Print Progress | % |
+
+Configure via `.env` — no code changes needed.
+
+---
+
+# 📦 Manual Installation
 
 ## 1. Clone
 ```bash
-git clone https://github.com/jeng37/BIQU-Panda-Breath-Mod.git
+git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
 cd BIQU-Panda-Breath-Mod
 2. Install Dependencies
 sudo apt update

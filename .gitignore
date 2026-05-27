@@ -1,4 +1,11 @@
 .~lock*
 .README.remote.tmp
 .README.remote.bak
+.env
+certs/
+__pycache__/
+*.pyc
+*.pyo
+panda_debug.log
+panda_config.json
 
