@@ -178,14 +178,19 @@ nano panda_config.json
 mkdir -p certs && bash cert_gen.sh
 mv cert.pem key.pem certs/
 
-# Build and start both services
-docker-compose up -d
+# Panda only
+docker compose up -d
+
+# Panda + Elegoo Centauri Carbon 2
+docker compose --profile cc2 up -d
 ```
 
 See **[SETUP.md](SETUP.md)** for the full guide including Panda Touch binding,
 CC2 credentials, and Home Assistant sensor verification.
 
 ### Elegoo Centauri Carbon 2 support
+
+> **⚠️ LAN-only mode required:** On the CC2, go to **Settings → Network → LAN Only Mode → Enable** before starting the CC2 backend. MQTT is not accessible otherwise.
 
 The CC2 backend (`cc2_connector.py`) bridges the CC2's native MQTT protocol
 into Home Assistant autodiscovery sensors:

@@ -18,3 +18,5 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    profiles:
+      - cc2

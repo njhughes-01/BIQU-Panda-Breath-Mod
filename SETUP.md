@@ -22,11 +22,18 @@ This guide covers setup for both the Panda and Elegoo CC2 backends in Docker.
    Edit `.env` with your Home Assistant MQTT credentials and printer IPs.
 
 3. **Start services:**
+
+   **Panda only** (no Elegoo CC2):
    ```bash
    docker compose up -d
    ```
 
-Both backends will auto-connect and publish to Home Assistant. See individual setup sections below.
+   **Panda + Elegoo Centauri Carbon 2:**
+   ```bash
+   docker compose --profile cc2 up -d
+   ```
+
+See individual setup sections below for printer-specific configuration.
 
 ---
 
@@ -89,6 +96,11 @@ Look for: `Connected to Panda` or similar success messages.
 
 The CC2 backend uses **cc2_connector.py** to communicate with your Elegoo Centauri Carbon 2 printer.
 
+> **⚠️ LAN-only mode required**
+> The CC2's MQTT broker is only accessible when the printer is in LAN-only mode.
+> On the printer: **Settings → Network → LAN Only Mode → Enable**
+> Without this, the MQTT port will not be reachable and the connector will fail to connect.
+
 ### 1. Configure .env
 
 Set these values in `.env`:
@@ -107,7 +119,7 @@ HA_MQTT_PASS=your_mqtt_password
 
 **CC2 Requirements:**
 - Printer must be on the same LAN as the Docker host
-- CC2 must be in **LAN-only mode**: Settings → Network → LAN Only Mode (enable this or MQTT won't work)
+- CC2 must be in **LAN-only mode** (see warning above)
 - Default credentials: `elegoo` / `123456` — if you've set an access code, use that as `CC2_PASS`
 
 ### 2. Verify CC2 Network Connectivity
