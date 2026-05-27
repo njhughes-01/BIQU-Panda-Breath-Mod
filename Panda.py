@@ -275,7 +275,12 @@ def on_mqtt_message(client, userdata, msg):
             val = msg.payload.decode().strip()
             if cc2_key == "bed_temp":
                 current_data["bed_temp"] = safe_float(val, current_data.get("bed_temp", 0.0))
-            elif cc2_key in ("nozzle_temp", "print_status", "print_progress"):
+            elif cc2_key in (
+                "nozzle_temp", "print_status", "print_progress",
+                "filament_detected", "remaining_time", "current_layer",
+                "filename", "z_height", "fan_speed", "box_fan_speed",
+                "led", "has_error",
+            ):
                 mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/cc2_{cc2_key}", val, retain=True)
             elif cc2_key == "active_filament_type" and current_data.get("slicer_priority_mode"):
                 target = FILAMENT_CHAMBER_MAP.get(val.upper(), FILAMENT_CHAMBER_MAP.get(val))

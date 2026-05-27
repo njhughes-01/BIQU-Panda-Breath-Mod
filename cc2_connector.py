@@ -150,6 +150,27 @@ def publish_to_ha() -> None:
             active_tray_id = (_canvas_info.get("active_tray_id", -1)
                               if _canvas_info else -1)
 
+            # Extended fields
+            filament_detected = "ON" if extruder.get("filament_detected") else "OFF"
+            remaining_time = int(print_status_obj.get("remaining_time_sec") or 0)
+            current_layer = int(print_status_obj.get("current_layer") or 0)
+            filename = str(print_status_obj.get("filename") or "")
+
+            gcode_move = printer_state.get("gcode_move") or {}
+            z_height = round(float(gcode_move.get("z") or 0), 2)
+
+            fans_obj = printer_state.get("fans") or {}
+            raw_fan = float((fans_obj.get("fan") or {}).get("speed") or 0)
+            fan_speed = int(round(raw_fan * 100 if raw_fan <= 1.0 else raw_fan))
+            raw_box = float((fans_obj.get("box_fan") or {}).get("speed") or 0)
+            box_fan_speed = int(round(raw_box * 100 if raw_box <= 1.0 else raw_box))
+
+            led_obj = printer_state.get("led") or {}
+            led_status = "ON" if led_obj.get("status") else "OFF"
+
+            exception_status = machine_status_obj.get("exception_status") or []
+            has_error = "ON" if exception_status else "OFF"
+
         # Convert progress to percentage (0-100)
         if isinstance(print_progress, (int, float)) and 0 <= float(print_progress) <= 1:
             print_progress = int(float(print_progress) * 100)
@@ -162,6 +183,15 @@ def publish_to_ha() -> None:
             f"{CC2_TOPIC_PREFIX}/chamber_temp": str(chamber_temp),
             f"{CC2_TOPIC_PREFIX}/print_status": str(print_status),
             f"{CC2_TOPIC_PREFIX}/print_progress": str(print_progress),
+            f"{CC2_TOPIC_PREFIX}/filament_detected": filament_detected,
+            f"{CC2_TOPIC_PREFIX}/remaining_time": str(remaining_time),
+            f"{CC2_TOPIC_PREFIX}/current_layer": str(current_layer),
+            f"{CC2_TOPIC_PREFIX}/filename": filename,
+            f"{CC2_TOPIC_PREFIX}/z_height": str(z_height),
+            f"{CC2_TOPIC_PREFIX}/fan_speed": str(fan_speed),
+            f"{CC2_TOPIC_PREFIX}/box_fan_speed": str(box_fan_speed),
+            f"{CC2_TOPIC_PREFIX}/led": led_status,
+            f"{CC2_TOPIC_PREFIX}/has_error": has_error,
         }
 
         for topic, payload in payload_map.items():
@@ -252,6 +282,48 @@ def publish_ha_autodiscovery() -> None:
             "state_class": "measurement",
             "icon": "mdi:progress-clock"
         },
+        "remaining_time": {
+            "name": "Remaining Time",
+            "unit_of_measurement": "s",
+            "device_class": "duration",
+            "state_class": "measurement",
+            "icon": "mdi:timer-outline"
+        },
+        "current_layer": {
+            "name": "Current Layer",
+            "unit_of_measurement": None,
+            "device_class": None,
+            "state_class": "measurement",
+            "icon": "mdi:layers"
+        },
+        "filename": {
+            "name": "Print Filename",
+            "unit_of_measurement": None,
+            "device_class": None,
+            "state_class": None,
+            "icon": "mdi:file-document-outline"
+        },
+        "z_height": {
+            "name": "Z Height",
+            "unit_of_measurement": "mm",
+            "device_class": None,
+            "state_class": "measurement",
+            "icon": "mdi:axis-z-arrow"
+        },
+        "fan_speed": {
+            "name": "Part Cooling Fan",
+            "unit_of_measurement": "%",
+            "device_class": None,
+            "state_class": "measurement",
+            "icon": "mdi:fan"
+        },
+        "box_fan_speed": {
+            "name": "Enclosure Fan",
+            "unit_of_measurement": "%",
+            "device_class": None,
+            "state_class": "measurement",
+            "icon": "mdi:fan"
+        },
     }
 
     for sensor_id, config in sensors.items():
@@ -280,6 +352,33 @@ def publish_ha_autodiscovery() -> None:
 
         ha_client.publish(discovery_topic, json.dumps(payload), qos=1, retain=True)
         logger.info(f"Published autodiscovery for {sensor_id}")
+
+    # Binary sensors
+    binary_sensors = [
+        ("filament_detected", "Filament Detected", "mdi:printer-3d-nozzle", None),
+        ("led",               "LED",               "mdi:led-on",            None),
+        ("has_error",         "Printer Error",     "mdi:alert-circle",      "problem"),
+    ]
+    for sensor_id, name, icon, device_class in binary_sensors:
+        uid = f"cc2_{sensor_id}"
+        p: dict = {
+            "unique_id": uid,
+            "object_id": uid,
+            "name": name,
+            "state_topic": f"{CC2_TOPIC_PREFIX}/{sensor_id}",
+            "availability_topic": f"{CC2_TOPIC_PREFIX}/status",
+            "payload_available": "online",
+            "payload_not_available": "offline",
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device": device,
+            "icon": icon,
+        }
+        if device_class:
+            p["device_class"] = device_class
+        ha_client.publish(f"homeassistant/binary_sensor/{uid}/config",
+                          json.dumps(p), qos=1, retain=True)
+        logger.info(f"Published autodiscovery for binary {sensor_id}")
 
 
 def cc2_on_connect(client: Client, userdata: Any, connect_flags: Any, rc: int, properties: Any = None) -> None:
