@@ -751,7 +751,7 @@ async def update_limits_from_ws():
     global panda_ws, bind_confirmed, bind_warning_shown
     global global_heating_state, last_switch_time
     global last_live_log_state, last_live_log_time
-    global last_stop_command_time
+    global last_stop_command_time, cc2_paused_for_preheat
     uri = f"ws://{PANDA_IP}/ws"
 
     while True:

@@ -100,6 +100,7 @@ _SPEED_MODE_NAMES: Dict[int, str] = {
 _file_list: List[str] = []
 # Last published filament type — prevents re-publishing on every publish_to_ha tick
 _last_filament_type: str = ""
+_canvas_retry_active: bool = False  # prevents spawning multiple concurrent retry threads
 
 
 def generate_client_id() -> str:
@@ -146,12 +147,16 @@ def request_canvas_info() -> None:
 
 def _retry_canvas_for_active_tray(attempts: int = 5, interval: float = 3.0) -> None:
     """Background retry loop: re-request canvas info until active_tray_id >= 0."""
-    for _ in range(attempts):
-        time.sleep(interval)
-        if _canvas_info.get("active_tray_id", -1) >= 0:
-            return  # already resolved
-        logger.info("active_tray_id still -1, retrying canvas info request")
-        request_canvas_info()
+    global _canvas_retry_active
+    try:
+        for _ in range(attempts):
+            time.sleep(interval)
+            if _canvas_info.get("active_tray_id", -1) >= 0:
+                return  # already resolved
+            logger.info("active_tray_id still -1, retrying canvas info request")
+            request_canvas_info()
+    finally:
+        _canvas_retry_active = False
 
 
 def request_file_list() -> None:
@@ -607,11 +612,14 @@ def cc2_on_message(client: Client, userdata: Any, msg: Any) -> None:
                     if active_tray >= 0:
                         publish_active_filament(active_tray)
                     else:
-                        # CC2 hasn't set active_tray_id yet; retry in background
-                        threading.Thread(
-                            target=_retry_canvas_for_active_tray,
-                            daemon=True
-                        ).start()
+                        # CC2 hasn't set active_tray_id yet; retry in background (one thread at a time)
+                        global _canvas_retry_active
+                        if not _canvas_retry_active:
+                            _canvas_retry_active = True
+                            threading.Thread(
+                                target=_retry_canvas_for_active_tray,
+                                daemon=True
+                            ).start()
                     logger.info(f"Canvas info updated, active_tray_id={active_tray}")
                 return
 
