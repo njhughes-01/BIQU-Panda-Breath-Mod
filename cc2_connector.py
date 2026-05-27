@@ -29,7 +29,8 @@ CC2_PASS = os.environ.get("CC2_PASS", "123456")
 CC2_SN = os.environ.get("CC2_SN", "")
 CC2_TOPIC_PREFIX = os.environ.get("CC2_TOPIC_PREFIX", "cc2")
 HA_MQTT_BROKER = os.environ.get("HA_MQTT_BROKER", "")
-HA_MQTT_PORT = int(os.environ.get("HA_MQTT_PORT", "1883"))
+HA_MQTT_PORT_ENV = os.environ.get("HA_MQTT_PORT", "1883")
+HA_MQTT_PORT = int(HA_MQTT_PORT_ENV) if HA_MQTT_PORT_ENV.isdigit() else 1883
 HA_MQTT_USER = os.environ.get("HA_MQTT_USER", "")
 HA_MQTT_PASS = os.environ.get("HA_MQTT_PASS", "")
 
@@ -84,13 +85,13 @@ def publish_to_ha() -> None:
         state = printer_state.copy()
 
     try:
-        nozzle_temp = state.get("extruder", {}).get("temperature", 0)
-        nozzle_target = state.get("extruder", {}).get("target", 0)
-        bed_temp = state.get("heater_bed", {}).get("temperature", 0)
-        bed_target = state.get("heater_bed", {}).get("target", 0)
-        chamber_temp = state.get("ztemperature_sensor", {}).get("temperature", 0)
-        print_status = state.get("print_stats", {}).get("state", "idle")
-        print_progress = state.get("print_stats", {}).get("progress", 0)
+        nozzle_temp = (state.get("extruder") or {}).get("temperature", 0)
+        nozzle_target = (state.get("extruder") or {}).get("target", 0)
+        bed_temp = (state.get("heater_bed") or {}).get("temperature", 0)
+        bed_target = (state.get("heater_bed") or {}).get("target", 0)
+        chamber_temp = (state.get("ztemperature_sensor") or {}).get("temperature", 0)
+        print_status = (state.get("print_stats") or {}).get("state", "idle")
+        print_progress = (state.get("print_stats") or {}).get("progress", 0)
 
         # Convert progress to percentage (0-100)
         if isinstance(print_progress, (int, float)) and 0 <= float(print_progress) <= 1:
@@ -245,9 +246,20 @@ def cc2_on_message(client: Client, userdata: Any, msg: Any) -> None:
 
         # Handle full status response (method 1002 reply) and delta updates
         elif "api_response" in msg.topic or "api_status" in msg.topic:
+            status_data = None
             if "result" in payload:
+                # JSON-RPC response (method 1002): printer objects nested under "status"
+                result = payload["result"]
+                if isinstance(result, dict):
+                    status_data = result.get("status") or result
+            elif "params" in payload:
+                # Unsolicited Klipper-style notification: params[0] is the status dict
+                params = payload["params"]
+                if isinstance(params, list) and params:
+                    status_data = params[0]
+            if status_data and isinstance(status_data, dict):
                 with printer_state_lock:
-                    deep_merge(printer_state, payload["result"])
+                    deep_merge(printer_state, status_data)
                 logger.debug(f"Updated printer state: {printer_state}")
                 publish_to_ha()
 

@@ -5,7 +5,8 @@ services:
     restart: unless-stopped
     volumes:
       - ./panda_config.json:/app/panda_config.json:ro
-      - ./certs:/app/certs:ro
+      - ./certs/cert.pem:/app/cert.pem:ro
+      - ./certs/key.pem:/app/key.pem:ro
     ports:
       - "8883:8883"
     env_file:
