@@ -158,12 +158,10 @@ INDEX_HTML = """<!doctype html>
         <b>Dry</b> — Filament drying mode. Runs at <em>Dry Temp</em> for <em>Dry Time</em> minutes, then shuts off automatically.
       </div>
       <div>
-        <strong style="color:#fff;display:block;margin-bottom:6px">Power &amp; Slicer</strong>
+        <strong style="color:#fff;display:block;margin-bottom:6px">Power &amp; Safety</strong>
         <b>Power On / Off</b> — Controls the physical relay powering the heating element. Turn off to cut power entirely regardless of mode.<br><br>
-        <b>Slicer On</b> — Overrides Chamber Target with the temperature embedded in the G-code file (M191/M141 commands). Useful if your slicer sets chamber temps per print.<br><br>
-        <b>Slicer Off</b> — Returns to the manually set Chamber Target.<br><br>
-        <b>Stop Heat</b> — Emergency stop. Immediately halts heating and resets the target to 20°C.<br><br>
-        <b>Unlock</b> — Clears a safety lock state if the device becomes locked after an error.
+        <b>Stop Heat</b> — Emergency stop. Immediately halts heating and resets the target to 20°C. This also activates a safety lock.<br><br>
+        <b>Unlock</b> — Clears the safety lock set by Stop Heat before normal operation can resume.
       </div>
       <div>
         <strong style="color:#fff;display:block;margin-bottom:6px">Number Controls</strong>
@@ -175,13 +173,24 @@ INDEX_HTML = """<!doctype html>
       <div>
         <strong style="color:#fff;display:block;margin-bottom:6px">Status Tiles</strong>
         <b>Status</b> — Current activity: Done, Heating…, Ready, etc.<br><br>
-        <b>Chamber (ist)</b> — Live chamber temperature from the device sensor.<br><br>
-        <b>Bed</b> — Bed temperature from the CC2 printer (updates live when CC2 backend is running).<br><br>
+        <b>Chamber</b> — Live chamber temperature from the Panda Breath sensor.<br><br>
+        <b>Bed</b> — Bed temperature. With CC2: sourced from the CC2 printer live. With Klipper: sourced from Home Assistant via the HA REST API.<br><br>
         <b>Heat</b> — Whether the heating element relay is ON or OFF right now.<br><br>
         <b>Mode</b> — Current operating mode (Automatic / Manual / Dry).<br><br>
-        <b>Panda Power</b> — Physical power relay state.<br><br>
-        <b>CC2 Nozzle / Print / Progress</b> — Live metrics from the Elegoo CC2 printer via the CC2 backend. Require the cc2_backend service to be running.<br><br>
-        <b>Slicer On/Off note</b> — Slicer auto-detection reads G-code temperature commands (M191/M141) via the Moonraker/Klipper API. This is <em>not</em> available on the Elegoo CC2 — the Slicer On/Off buttons have no effect when using a CC2.
+        <b>CC2 Nozzle / Print / Progress</b> — Live metrics from the Elegoo CC2. Only populated when the cc2_backend service is running.
+      </div>
+      <div>
+        <strong style="color:#fff;display:block;margin-bottom:6px">Slicer Integration (Klipper only)</strong>
+        <b>How it works</b> — When <b>Slicer Priority</b> is ON, the backend polls Moonraker for M191/M141 commands in the active G-code. When a chamber temp command is detected, it automatically sets the Chamber Target to match — no manual input needed.<br><br>
+        <b>OrcaSlicer setup</b> — In OrcaSlicer, go to <em>Filament → Custom G-code → Start G-code</em> and add <code>M191 S[chamber_temperature]</code>. Set your desired chamber temp per filament profile under <em>Filament → Temperature → Chamber</em>. When you slice and print, OrcaSlicer embeds the temp in the G-code and the backend picks it up automatically.<br><br>
+        <b>Slicer On / Off buttons</b> — Toggle whether slicer-detected temps override the manual Chamber Target.<br><br>
+        <b>Not available on CC2</b> — The Elegoo CC2 does not run Klipper/Moonraker. Slicer Priority mode has no effect when using a CC2. Set your Chamber Target manually or use Auto mode.
+      </div>
+      <div>
+        <strong style="color:#fff;display:block;margin-bottom:6px">Setup: CC2 vs Klipper</strong>
+        <b>Klipper/Moonraker (standard)</b> — Run <code>docker-compose.yml</code> only. Bed temp is read from Home Assistant (sensor entity set in config). Slicer Priority works. You need the HA MQTT integration and Mosquitto broker running.<br><br>
+        <b>Elegoo CC2</b> — Run <code>docker-compose.cc2.yml</code> as your compose file. The cc2_backend connects directly to the CC2 printer and publishes its sensor data to HA via MQTT autodiscovery. Bed temp is sourced from the CC2 live. Slicer Priority is not available.<br><br>
+        <b>To complete automated heating</b> — In either setup, switch the Panda to <b>Auto</b> mode and set a Chamber Target. The heater will run whenever the chamber is below target. For per-filament automation, use a Home Assistant automation that fires on print start and publishes your desired target to <code>panda_breath_mod/soll/set</code>. The backend will apply it immediately.
       </div>
     </div>
   </div>
