@@ -5,7 +5,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-## [1.9.3] - 2026-05-27
+## [2.0.0] - 2026-05-27
 
 ### Added
 - Docker/GHCR multi-arch build workflow (`linux/amd64`, `linux/arm64`) — pre-built images

@@ -3,7 +3,7 @@
 <!-- REPO_VIEWS_BADGE_END -->
 
 # BIQU Panda Breath Mod 🚀
-### Panda Logic Sync v1.9.3 (Bug Fix Release)
+### Panda Logic Sync v2.0.0
 
 Intelligent control system for the **BIQU Panda Breath** chamber heater.
 
@@ -23,7 +23,7 @@ This project simulates a **Bambu Lab printer** on a host system (PC / server) an
 
 ---
 
-# ✨ Key Features (v1.9.3)
+# ✨ Key Features (v2.0.0)
 
 - 🔥 Immediate heating in all modes (no bed wait)
 - 🔐 Global lock / unlock safety system
@@ -178,7 +178,7 @@ Docker has stable defaults for internal service addresses: `HA_MQTT_BROKER=mosqu
 To pin to a specific release instead of `:latest`, edit the `image:` line in your compose file:
 
 ```yaml
-image: ghcr.io/njhughes-01/biqu-panda-breath-mod:1.9.3
+image: ghcr.io/njhughes-01/biqu-panda-breath-mod:2.0.0
 ```
 
 Available tags: [ghcr.io/njhughes-01/biqu-panda-breath-mod](https://github.com/njhughes-01/BIQU-Panda-Breath-Mod/pkgs/container/biqu-panda-breath-mod) — see [CHANGELOG.md](CHANGELOG.md) for what's in each version.

@@ -11,7 +11,7 @@
 services:
   cc2_backend:
     container_name: cc2_backend
-    # To pin to a specific release: image: ghcr.io/njhughes-01/biqu-panda-breath-mod:1.9.3
+    # To pin to a specific release: image: ghcr.io/njhughes-01/biqu-panda-breath-mod:2.0.0
     image: ghcr.io/njhughes-01/biqu-panda-breath-mod:latest
     command: python3 cc2_connector.py
     restart: unless-stopped

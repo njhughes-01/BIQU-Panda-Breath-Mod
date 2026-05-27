@@ -16,7 +16,7 @@ BASE_DIR = Path(__file__).resolve().parent
 # - Entfernt NICHTS: Original bleibt, Erweiterungen sind additiv/ersetzend innerhalb
 #   der bestehenden Struktur (nur ergänzt/erweitert).
 # ============================================================
-PANDA_VERSION = "v1.9.2"
+PANDA_VERSION = "v2.0.0"
 last_reported_mode = None
 mode_change_hint = ""
 heating_locked = False
