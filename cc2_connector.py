@@ -285,7 +285,7 @@ def cc2_on_message(client: Client, userdata: Any, msg: Any) -> None:
             if status_data and isinstance(status_data, dict):
                 with printer_state_lock:
                     deep_merge(printer_state, status_data)
-                logger.debug(f"Updated printer state: {printer_state}")
+                logger.info(f"[STATE_DUMP] {json.dumps(printer_state)}")
                 publish_to_ha()
 
     except json.JSONDecodeError as e:
