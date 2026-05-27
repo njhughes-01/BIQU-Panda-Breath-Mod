@@ -22,6 +22,7 @@ services:
       PANDA_ACCESS_CODE: ${PANDA_ACCESS_CODE:-}
       PANDA_HOST_IP: ${PANDA_HOST_IP:-}
       PANDA_MQTT_TOPIC_PREFIX: ${PANDA_MQTT_TOPIC_PREFIX:-panda_breath_mod}
+      CC2_IP: ${CC2_IP:-}
       CC2_TOPIC_PREFIX: ${CC2_TOPIC_PREFIX:-cc2}
     volumes:
       - panda_certs:/app/certs
