@@ -131,11 +131,22 @@ def publish_to_ha() -> None:
             if chamber_temp is None:
                 chamber_temp = 0
 
-            print_stats = printer_state.get("print_stats") or {}
-            print_status = print_stats.get("state") or "idle"
-            print_progress = print_stats.get("progress")
+            # CC2 uses "print_status" (dict) not "print_stats"
+            print_status_obj = printer_state.get("print_status") or {}
+            state_str = (print_status_obj.get("state") or "").lower().strip()
+            # Fall back to machine_status numeric code when state string is absent
+            machine_status_obj = printer_state.get("machine_status") or {}
+            machine_code = int(machine_status_obj.get("status") or 0)
+            if state_str:
+                print_status = state_str
+            elif machine_code >= 2:
+                print_status = "printing"
+            else:
+                print_status = "idle"
+            # Progress lives in machine_status on the CC2
+            print_progress = machine_status_obj.get("progress")
             if print_progress is None:
-                print_progress = 0
+                print_progress = print_status_obj.get("progress") or 0
             active_tray_id = (_canvas_info.get("active_tray_id", -1)
                               if _canvas_info else -1)
 
@@ -162,14 +173,17 @@ def publish_to_ha() -> None:
         # Detect print start → request fresh canvas info to get active tray
         global _last_print_state
         printing_states = {"printing", "busy", "paused", "pausing", "resuming"}
+        current_state = str(print_status).lower()
         was_printing = _last_print_state in printing_states
-        is_printing = str(print_status).lower() in printing_states
+        is_printing = current_state in printing_states
+        if current_state != _last_print_state:
+            logger.info(f"Print state changed: {_last_print_state!r} → {current_state!r} (machine_code={machine_code})")
         if is_printing and not was_printing:
             logger.info(f"Print started (state={print_status}), requesting canvas info")
             request_canvas_info()
         elif is_printing and active_tray_id >= 0:
             publish_active_filament(active_tray_id)
-        _last_print_state = str(print_status).lower()
+        _last_print_state = current_state
 
     except Exception as e:
         logger.error(f"Error publishing to HA: {e}")
