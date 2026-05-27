@@ -289,16 +289,20 @@ def on_mqtt_message(client, userdata, msg):
                     mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(target), retain=True)
                     log_event(f"[CC2-SLICER] {val} → chamber {target}°C", force_console=True)
                     if panda_ws and int(target) > 0:
-                        asyncio.run_coroutine_threadsafe(
-                            panda_ws.send(json.dumps({
+                        async def _cc2_heat(t=int(target)):
+                            await panda_ws.send(json.dumps({"settings": {"isrunning": 0}}))
+                            await asyncio.sleep(0.2)
+                            await panda_ws.send(json.dumps({
                                 "settings": {
-                                    "set_temp": int(target),
-                                    "work_on": 1,
+                                    "work_mode": 2,
+                                    "work_on": True,
+                                    "set_temp": t,
                                     "isrunning": 1
                                 }
-                            })),
-                            main_loop
-                        )
+                            }))
+                        asyncio.run_coroutine_threadsafe(_cc2_heat(), main_loop)
+                    elif not panda_ws:
+                        log_event("[CC2-SLICER] Panda not connected, heating queued in kammer_soll", force_console=True)
         except Exception:
             pass
         return

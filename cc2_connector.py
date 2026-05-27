@@ -98,6 +98,8 @@ _SPEED_MODE_NAMES: Dict[int, str] = {
 
 # Cached file list from CC2
 _file_list: List[str] = []
+# Last published filament type — prevents re-publishing on every publish_to_ha tick
+_last_filament_type: str = ""
 
 
 def generate_client_id() -> str:
@@ -157,6 +159,7 @@ def request_file_list() -> None:
 
 
 def publish_active_filament(tray_id: int) -> None:
+    global _last_filament_type
     if not ha_client or not ha_client.is_connected():
         return
     canvas = _canvas_info.get("canvas_list", [{}])[0] if _canvas_info else {}
@@ -170,7 +173,8 @@ def publish_active_filament(tray_id: int) -> None:
         if len(loaded) == 1:
             filament_type = loaded[0].get("filament_type", "")
             logger.info(f"active_tray_id unavailable, single loaded tray fallback: {filament_type}")
-    if filament_type:
+    if filament_type and filament_type != _last_filament_type:
+        _last_filament_type = filament_type
         ha_client.publish(f"{CC2_TOPIC_PREFIX}/active_filament_type", filament_type, qos=1, retain=True)
         logger.info(f"Active filament: tray {tray_id} = {filament_type}")
 
@@ -305,6 +309,10 @@ def publish_to_ha() -> None:
         if is_printing and not was_printing:
             logger.info(f"Print started (state={print_status}), requesting canvas info")
             request_canvas_info()
+        elif not is_printing and was_printing:
+            # Print ended — reset so next print re-triggers filament detection
+            global _last_filament_type
+            _last_filament_type = ""
         elif is_printing and active_tray_id >= 0:
             publish_active_filament(active_tray_id)
         _last_print_state = current_state
