@@ -45,9 +45,16 @@ ha_client: Optional[Client] = None
 # Client identifiers
 client_id: str = ""
 request_id: str = ""
+_request_counter: int = 100
 
 # State cache for publish_to_ha — only publish changed values
 _last_published: Dict[str, str] = {}
+
+# Track print state to detect transitions
+_last_print_state: str = ""
+
+# AMS canvas state
+_canvas_info: Dict[str, Any] = {}
 
 
 def generate_client_id() -> str:
@@ -73,6 +80,26 @@ def deep_merge(base: Dict[str, Any], update: Dict[str, Any]) -> Dict[str, Any]:
         else:
             base[key] = value
     return base
+
+
+def request_canvas_info() -> None:
+    global _request_counter
+    if cc2_client and cc2_client.is_connected():
+        payload = json.dumps({"id": _request_counter, "method": 2005})
+        cc2_client.publish(f"elegoo/{CC2_SN}/{client_id}/api_request", payload, qos=1)
+        _request_counter += 1
+
+
+def publish_active_filament(tray_id: int) -> None:
+    if not ha_client or not ha_client.is_connected():
+        return
+    canvas = _canvas_info.get("canvas_list", [{}])[0] if _canvas_info else {}
+    trays = canvas.get("tray_list", [])
+    if 0 <= tray_id < len(trays):
+        filament_type = trays[tray_id].get("filament_type", "")
+        if filament_type:
+            ha_client.publish(f"{CC2_TOPIC_PREFIX}/active_filament_type", filament_type, qos=1, retain=True)
+            logger.info(f"Active filament: tray {tray_id} = {filament_type}")
 
 
 def publish_to_ha() -> None:
@@ -109,6 +136,8 @@ def publish_to_ha() -> None:
             print_progress = print_stats.get("progress")
             if print_progress is None:
                 print_progress = 0
+            active_tray_id = (_canvas_info.get("active_tray_id", -1)
+                              if _canvas_info else -1)
 
         # Convert progress to percentage (0-100)
         if isinstance(print_progress, (int, float)) and 0 <= float(print_progress) <= 1:
@@ -129,6 +158,18 @@ def publish_to_ha() -> None:
                 ha_client.publish(topic, payload, qos=1, retain=False)
                 _last_published[topic] = payload
                 logger.debug(f"Published {topic} = {payload}")
+
+        # Detect print start → request fresh canvas info to get active tray
+        global _last_print_state
+        printing_states = {"printing", "busy", "paused", "pausing", "resuming"}
+        was_printing = _last_print_state in printing_states
+        is_printing = str(print_status).lower() in printing_states
+        if is_printing and not was_printing:
+            logger.info(f"Print started (state={print_status}), requesting canvas info")
+            request_canvas_info()
+        elif is_printing and active_tray_id >= 0:
+            publish_active_filament(active_tray_id)
+        _last_print_state = str(print_status).lower()
 
     except Exception as e:
         logger.error(f"Error publishing to HA: {e}")
@@ -256,13 +297,26 @@ def cc2_on_message(client: Client, userdata: Any, msg: Any) -> None:
             logger.warning(f"Unexpected non-dictionary payload received on {msg.topic}")
             return
 
+        # Handle canvas info response (method 2005)
+        if "api_response" in msg.topic and payload.get("method") == 2005:
+            result = payload.get("result", {})
+            if result.get("error_code") == 0:
+                canvas = result.get("canvas_info", {})
+                _canvas_info.update(canvas)
+                active_tray = canvas.get("active_tray_id", -1)
+                if active_tray >= 0:
+                    publish_active_filament(active_tray)
+                logger.info(f"Canvas info updated, active_tray_id={active_tray}")
+            return
+
         # Handle registration response
         if "register_response" in msg.topic:
             if payload.get("error") == "ok":
-                logger.info("Registration successful, requesting full status")
-                # Request full status
-                req_payload = json.dumps({"id": 1, "method": 1002})
-                client.publish(f"elegoo/{CC2_SN}/{client_id}/api_request", req_payload, qos=1)
+                logger.info("Registration successful, requesting full status and canvas info")
+                client.publish(f"elegoo/{CC2_SN}/{client_id}/api_request",
+                               json.dumps({"id": 1, "method": 1002}), qos=1)
+                client.publish(f"elegoo/{CC2_SN}/{client_id}/api_request",
+                               json.dumps({"id": 2, "method": 2005}), qos=1)
             else:
                 logger.error(f"Registration failed: {payload}")
 
@@ -285,7 +339,7 @@ def cc2_on_message(client: Client, userdata: Any, msg: Any) -> None:
             if status_data and isinstance(status_data, dict):
                 with printer_state_lock:
                     deep_merge(printer_state, status_data)
-                logger.info(f"[STATE_DUMP] {json.dumps(printer_state)}")
+                logger.debug(f"Updated printer state keys: {list(printer_state.keys())}")
                 publish_to_ha()
 
     except json.JSONDecodeError as e:

@@ -89,6 +89,15 @@ HA_TOKEN = CONFIG["HA_TOKEN"]
 PRINTER_IP = CONFIG["PRINTER_IP"]
 CC2_IP = os.environ.get("CC2_IP", "")
 CC2_TOPIC_PREFIX = os.environ.get("CC2_TOPIC_PREFIX", CONFIG.get("CC2_TOPIC_PREFIX", "cc2"))
+
+# Filament type → chamber target (°C). Override via CC2_FILAMENT_MAP env var (JSON).
+_DEFAULT_FILAMENT_MAP = {"PLA": 0, "PLA+": 0, "PETG": 35, "ABS": 50, "ASA": 55,
+                         "PA": 65, "PA-CF": 65, "PC": 60, "TPU": 0, "TPE": 0}
+try:
+    _raw = os.environ.get("CC2_FILAMENT_MAP", "")
+    FILAMENT_CHAMBER_MAP = {**_DEFAULT_FILAMENT_MAP, **json.loads(_raw)} if _raw else _DEFAULT_FILAMENT_MAP
+except Exception:
+    FILAMENT_CHAMBER_MAP = _DEFAULT_FILAMENT_MAP
 # ==========================================
 # current_data nutzt jetzt die exakten Namen aus der Hardware (filament_temp/timer)
 current_data = {
@@ -256,6 +265,12 @@ def on_mqtt_message(client, userdata, msg):
                 current_data["bed_temp"] = safe_float(val, current_data.get("bed_temp", 0.0))
             elif cc2_key in ("nozzle_temp", "print_status", "print_progress"):
                 mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/cc2_{cc2_key}", val, retain=True)
+            elif cc2_key == "active_filament_type" and current_data.get("slicer_priority_mode"):
+                target = FILAMENT_CHAMBER_MAP.get(val.upper(), FILAMENT_CHAMBER_MAP.get(val))
+                if target is not None:
+                    current_data["kammer_soll"] = float(target)
+                    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(target), retain=True)
+                    log_event(f"[CC2-SLICER] {val} → chamber {target}°C", force_console=True)
         except Exception:
             pass
         return
