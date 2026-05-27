@@ -60,10 +60,7 @@ def generate_client_id() -> str:
 
 def generate_request_id() -> str:
     """Generate request ID matching the web interface format: 16 random hex chars + full hex timestamp."""
-    rand_hex = ''.join(
-        format(random.randint(0, 15) if c == 'x' else (random.randint(0, 3) + 8), 'x')
-        for c in 'xxxxxxxxxxxxxxxx'
-    )
+    rand_hex = f"{random.getrandbits(64):016x}"
     ts_hex = format(int(time.time() * 1000), "x")
     return rand_hex + ts_hex
 
@@ -405,7 +402,9 @@ def main() -> None:
         logger.info("Shutting down...")
         if ha_client:
             try:
-                ha_client.publish(f"{CC2_TOPIC_PREFIX}/status", "offline", qos=1, retain=True)
+                result = ha_client.publish(f"{CC2_TOPIC_PREFIX}/status", "offline", qos=1, retain=True)
+                result.wait_for_publish(timeout=2.0)
+                ha_client.disconnect()
             except Exception:
                 pass
             ha_client.loop_stop()
