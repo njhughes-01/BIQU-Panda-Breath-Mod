@@ -10,7 +10,7 @@ BASE_DIR = Path(__file__).resolve().parent
 # ✅ FIX / ERWEITERUNG: SLICER MODE + FEHLENDE ENTITÄTEN (HA)
 # ------------------------------------------------------------
 # - Implementiert "Slicer Priority Mode" (Switch)
-# - Implementiert "Heizung Stop" (Button)
+# - Implementiert "Heat Stop" (Button)
 # - Implementiert Slicer-Auto-Erkennung (G-Code Analyse via Moonraker)
 # - Fügt fehlende MQTT Discovery Entities hinzu (damit "Entity not found" weg ist)
 # - Entfernt NICHTS: Original bleibt, Erweiterungen sind additiv/ersetzend innerhalb
@@ -253,7 +253,7 @@ def on_mqtt_message(client, userdata, msg):
         power_forced_off = False
 
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/lock_status", "UNLOCKED", retain=True)
-        mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/status", "Bereit", retain=True)
+        mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/status", "Ready", retain=True)
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/panda_modus", "Standby", retain=True)
         return
 
@@ -344,7 +344,7 @@ def on_mqtt_message(client, userdata, msg):
         heating_locked = False
         power_forced_off = False
         
-        mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/panda_modus", "Manuell", retain=True)
+        mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/panda_modus", "Manual", retain=True)
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_priority_mode", "OFF", retain=True)
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/panda_power", "ON", retain=True)
 
@@ -369,7 +369,7 @@ def on_mqtt_message(client, userdata, msg):
         log_event(">>> AUTO MODE ENTERED <<<", force_console=True)
         heating_locked = False
         power_forced_off = False
-        mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/panda_modus", "Automatik", retain=True)
+        mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/panda_modus", "Automatic", retain=True)
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/panda_power", "ON", retain=True)
         current_data["slicer_priority_mode"] = False
 
@@ -563,7 +563,7 @@ def setup_mqtt_discovery():
         }), retain=True)
 
     mqtt_client.publish(f"homeassistant/sensor/{base}_panda_modus/config", json.dumps({
-        "name": "Panda Modus", "state_topic": f"{base}/panda_modus", "unique_id": f"{PRINTER_SN}_panda_modus", "device": dev, "icon": "mdi:state-machine"
+        "name": "Panda Mode", "state_topic": f"{base}/panda_modus", "unique_id": f"{PRINTER_SN}_panda_modus", "device": dev, "icon": "mdi:state-machine"
     }), retain=True)
        
     mqtt_client.publish(f"homeassistant/sensor/{base}_kammer_ist/config", json.dumps({
@@ -576,11 +576,11 @@ def setup_mqtt_discovery():
         }), retain=True)
 
     mqtt_client.publish(f"homeassistant/sensor/{base}_status/config", json.dumps({
-        "name": "Panda Heiz Status", "state_topic": f"{base}/status", "unique_id": f"pb_v66_{PRINTER_SN}_status", "device": dev, "icon": "mdi:fire-circle"
+        "name": "Panda Heat Status", "state_topic": f"{base}/status", "unique_id": f"pb_v66_{PRINTER_SN}_status", "device": dev, "icon": "mdi:fire-circle"
     }), retain=True)
 
     mqtt_client.publish(f"homeassistant/binary_sensor/{base}_fan/config", json.dumps({
-        "name": "Panda Filter Lüfter", "state_topic": f"{base}/fan", "unique_id": f"pb_v66_{PRINTER_SN}_fan", "device": dev, "payload_on": "ON", "payload_off": "OFF", "device_class": "fan"
+        "name": "Panda Filter Fan", "state_topic": f"{base}/fan", "unique_id": f"pb_v66_{PRINTER_SN}_fan", "device": dev, "payload_on": "ON", "payload_off": "OFF", "device_class": "fan"
     }), retain=True)
 
     mqtt_client.publish(f"homeassistant/switch/{base}_panda_power/config", json.dumps({
@@ -592,7 +592,7 @@ def setup_mqtt_discovery():
     }), retain=True)
 
     mqtt_client.publish(f"homeassistant/button/{base}_heizung_stop/config", json.dumps({
-        "name": "Heizung Stop", "command_topic": f"{base}/heizung_stop/set", "unique_id": f"{PRINTER_SN}_heizung_stop_btn", "device": dev, "icon": "mdi:radiator-off"
+        "name": "Heat Stop", "command_topic": f"{base}/heizung_stop/set", "unique_id": f"{PRINTER_SN}_heizung_stop_btn", "device": dev, "icon": "mdi:radiator-off"
     }), retain=True)
 
     mqtt_client.publish(f"homeassistant/sensor/{base}_slicer_soll/config", json.dumps({
@@ -811,9 +811,9 @@ async def update_limits_from_ws():
                             modus = "Standby"
                         else:
                             if work_mode == 1:
-                                modus = "Automatik"
+                                modus = "Automatic"
                             elif work_mode == 2:
-                                modus = "Manuell"
+                                modus = "Manual"
                             elif work_mode == 3:
                                 modus = "Dry"
                             else:
@@ -924,7 +924,7 @@ async def update_limits_from_ws():
 
                         elif work_mode_live == 3:
                             if ist < (target - HYSTERESE):
-                                target_state, info = 85.0, "Heizen..."
+                                target_state, info = 85.0, "Heating..."
                             elif ist >= target:
                                 target_state, info = 20.0, "Hysterese"
                             else:
@@ -932,9 +932,9 @@ async def update_limits_from_ws():
 
                         elif work_mode_live == 1:
                             if bed_ist <= limit:
-                                target_state, info = 20.0, "Fertig"
+                                target_state, info = 20.0, "Done"
                             elif ist < (target - HYSTERESE):
-                                target_state, info = 85.0, "Heizen..."
+                                target_state, info = 85.0, "Heating..."
                             elif ist >= target:
                                 target_state, info = 20.0, "Hysterese"
                             else:
@@ -942,7 +942,7 @@ async def update_limits_from_ws():
 
                         elif work_mode_live == 2:
                             if ist < (target - HYSTERESE):
-                                target_state, info = 85.0, "Heizen..."
+                                target_state, info = 85.0, "Heating..."
                             elif ist >= target:
                                 target_state, info = 20.0, "Hysterese"
                             else:
@@ -1006,7 +1006,7 @@ async def update_limits_from_ws():
 
                         mqtt_client.publish(
                             f"{MQTT_TOPIC_PREFIX}/heizung",
-                            "AN" if actual_heating else "AUS",
+                            "ON" if actual_heating else "OFF",
                             retain=True
                         )
                         mqtt_client.publish(
@@ -1047,7 +1047,7 @@ async def update_limits_from_ws():
 
                                 log_event(
                                     f"LIVE | Bed:{bed_ist:.1f}°C | Kammer:{target:.1f}/{ist:.1f}°C | "
-                                    f"Heizung:{'AN' if actual_heating else 'AUS'} | "
+                                    f"Heat:{'ON' if actual_heating else 'OFF'} | "
                                     f"Fan:{fan_state} | Modus:{work_mode_live} | Status:{info}"
                                 )
 
@@ -1140,7 +1140,7 @@ async def handle_panda(reader, writer):
                         log_event("[BED-SENSOR] Verbindung wieder OK", force_console=True)
                         mqtt_client.publish(
                             f"{MQTT_TOPIC_PREFIX}/status",
-                            "Bereit",
+                            "Ready",
                             retain=True
                         )
                         bed_sensor_error = False
@@ -1184,23 +1184,23 @@ async def handle_panda(reader, writer):
                         remaining = int(last_ws_settings.get("remaining_seconds", 0) or 0)
 
                         if remaining <= 0:
-                            target_state, info = 20.0, "Fertig"
+                            target_state, info = 20.0, "Done"
                         elif ist < (target - HYSTERESE):
-                            target_state, info = 85.0, "Heizen..."
+                            target_state, info = 85.0, "Heating..."
                         else:
                             target_state, info = 20.0, "Hysterese"
 
                     elif work_mode == 1:
                         if bed_ist <= limit:
-                            target_state, info = 20.0, "Fertig"
+                            target_state, info = 20.0, "Done"
                         elif ist < (target - HYSTERESE):
-                            target_state, info = 85.0, "Heizen..."
+                            target_state, info = 85.0, "Heating..."
                         else:
                             target_state, info = 20.0, "Hysterese"
 
                     elif work_mode == 2:
                         if ist < (target - HYSTERESE):
-                            target_state, info = 85.0, "Heizen..."
+                            target_state, info = 85.0, "Heating..."
                         else:
                             target_state, info = 20.0, "Hysterese"
 

@@ -62,7 +62,7 @@ def update_topic(topic, payload):
 
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
-    connected = int(reason_code) == 0
+    connected = not reason_code.is_failure
     with state_lock:
         state["mqtt_connected"] = connected
     if connected:
@@ -119,6 +119,7 @@ INDEX_HTML = """<!doctype html>
   <title>Panda Breath Control</title>
   <style>
     :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; background: #151719; color: #f4f6f8; }
+    .hidden { display: none !important; }
     body { margin: 0; background: #151719; }
     header { height: 48px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; background: #25272b; border-bottom: 1px solid #3a3d42; }
     h1 { font-size: 16px; margin: 0; font-weight: 700; }
@@ -143,12 +144,49 @@ INDEX_HTML = """<!doctype html>
 <body>
   <header>
     <h1>Panda Breath Control</h1>
-    <div class="status"><span id="mqttDot" class="dot"></span><span id="mqttText">MQTT</span></div>
+    <div style="display:flex;gap:12px;align-items:center">
+      <button id="helpToggle" style="height:32px;padding:0 12px;font-size:13px" onclick="document.getElementById('helpPanel').classList.toggle('hidden')">? Help</button>
+      <div class="status"><span id="mqttDot" class="dot"></span><span id="mqttText">MQTT</span></div>
+    </div>
   </header>
+  <div id="helpPanel" class="hidden" style="background:#1a1d21;border-bottom:1px solid #3a3d42;padding:16px 20px;font-size:13px;line-height:1.7;color:#c8d0db">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:20px">
+      <div>
+        <strong style="color:#fff;display:block;margin-bottom:6px">Mode Buttons</strong>
+        <b>Auto</b> — Device controls heating automatically. It reads the chamber temp and runs the heater until the <em>Chamber Target</em> is reached, then holds it. This is the normal operating mode during a print.<br><br>
+        <b>Manual</b> — Heater runs continuously at the set target. No automatic shutoff based on temp. Use for preheat or when you want direct control.<br><br>
+        <b>Dry</b> — Filament drying mode. Runs at <em>Dry Temp</em> for <em>Dry Time</em> minutes, then shuts off automatically.
+      </div>
+      <div>
+        <strong style="color:#fff;display:block;margin-bottom:6px">Power &amp; Slicer</strong>
+        <b>Power On / Off</b> — Controls the physical relay powering the heating element. Turn off to cut power entirely regardless of mode.<br><br>
+        <b>Slicer On</b> — Overrides Chamber Target with the temperature embedded in the G-code file (M191/M141 commands). Useful if your slicer sets chamber temps per print.<br><br>
+        <b>Slicer Off</b> — Returns to the manually set Chamber Target.<br><br>
+        <b>Stop Heat</b> — Emergency stop. Immediately halts heating and resets the target to 20°C.<br><br>
+        <b>Unlock</b> — Clears a safety lock state if the device becomes locked after an error.
+      </div>
+      <div>
+        <strong style="color:#fff;display:block;margin-bottom:6px">Number Controls</strong>
+        <b>Chamber Target</b> — Target temperature (°C) for the enclosure in Auto or Manual mode. Edit and press Send.<br><br>
+        <b>Bed Limit</b> — If the bed temperature exceeds this value the heater will not activate. Prevents overheating when printing high-temp materials.<br><br>
+        <b>Filter Fan Start</b> — Temperature at which the exhaust/filter fan kicks on automatically.<br><br>
+        <b>Dry Temp / Dry Time</b> — Temperature (°C) and duration (minutes) used when Dry mode is activated.
+      </div>
+      <div>
+        <strong style="color:#fff;display:block;margin-bottom:6px">Status Tiles</strong>
+        <b>Status</b> — Current activity: Done, Heating…, Ready, etc.<br><br>
+        <b>Chamber (ist)</b> — Live chamber temperature from the device sensor.<br><br>
+        <b>Bed</b> — Bed temperature pulled from Home Assistant.<br><br>
+        <b>Heat</b> — Whether the heating element relay is ON or OFF right now.<br><br>
+        <b>Mode</b> — Current operating mode (Automatic / Manual / Dry).<br><br>
+        <b>Panda Power</b> — Physical power relay state.
+      </div>
+    </div>
+  </div>
   <main>
     <section class="grid" id="tiles"></section>
     <section class="controls">
-      <button class="primary" data-cmd="auto">Auto</button>
+      <button data-cmd="auto">Auto</button>
       <button data-cmd="manual">Manual</button>
       <button data-cmd="dry">Dry</button>
       <button data-cmd="slicer_on">Slicer On</button>
@@ -180,6 +218,10 @@ INDEX_HTML = """<!doctype html>
     }
     document.querySelectorAll('[data-cmd]').forEach(btn => btn.onclick = () => post({ command: btn.dataset.cmd }));
     document.querySelectorAll('[data-send]').forEach(btn => btn.onclick = () => post({ command: btn.dataset.send, value: document.getElementById(btn.dataset.send).value }));
+    function setActive(cmd, active) {
+      const btn = document.querySelector(`[data-cmd="${cmd}"]`);
+      if (btn) btn.classList.toggle('primary', active);
+    }
     async function refresh() {
       const res = await fetch('/api/state');
       const data = await res.json();
@@ -191,6 +233,19 @@ INDEX_HTML = """<!doctype html>
         const input = document.getElementById(key);
         if (document.activeElement !== input && topics[key] !== undefined) input.value = topics[key];
       }
+      // Mode buttons — mutually exclusive
+      const mode = topics.panda_modus || '';
+      setActive('auto',   mode === 'Automatic');
+      setActive('manual', mode === 'Manual');
+      setActive('dry',    mode === 'Dry');
+      // Power buttons — mutually exclusive
+      const power = topics.panda_power || '';
+      setActive('power_on',  power === 'ON');
+      setActive('power_off', power === 'OFF');
+      // Slicer buttons — mutually exclusive
+      const slicer = topics.slicer_priority_mode || '';
+      setActive('slicer_on',  slicer === 'ON');
+      setActive('slicer_off', slicer === 'OFF');
       document.getElementById('logs').textContent = (data.logs || []).join('\\n');
     }
     setInterval(refresh, 1500);
