@@ -11,6 +11,8 @@ services:
       - "8883:8883"
     env_file:
       - .env
+    volumes:
+      - panda_certs:/app/certs
     logging:
       driver: json-file
       options:
@@ -40,3 +42,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+volumes:
+  panda_certs:

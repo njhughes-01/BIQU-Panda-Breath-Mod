@@ -1,5 +1,5 @@
 #!/bin/sh
-# Generate panda_config.json from environment variables before starting Panda.py
+# Generate panda_config.json and TLS certs from environment variables before starting Panda.py
 if [ "$1" = "python3" ] && [ "$2" = "Panda.py" ]; then
 
     # Auto-detect host LAN IP reachable by the Panda printer if not explicitly set
@@ -7,6 +7,22 @@ if [ "$1" = "python3" ] && [ "$2" = "Panda.py" ]; then
         PANDA_HOST_IP=$(ip route get "$PANDA_IP" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") print $(i+1)}')
         echo "Auto-detected PANDA_HOST_IP=$PANDA_HOST_IP"
     fi
+
+    # Generate TLS certs on first run if not already present
+    if [ ! -f /app/certs/cert.pem ] || [ ! -f /app/certs/key.pem ]; then
+        echo "Generating self-signed TLS certificates..."
+        mkdir -p /app/certs
+        openssl req -x509 -newkey rsa:2048 \
+            -keyout /app/certs/key.pem \
+            -out /app/certs/cert.pem \
+            -days 3650 -nodes \
+            -subj "/CN=panda-breath" 2>/dev/null
+        echo "TLS certificates generated"
+    fi
+
+    # Copy certs to app root where Panda.py expects them
+    cp /app/certs/cert.pem /app/cert.pem
+    cp /app/certs/key.pem /app/key.pem
 
     python3 - <<PYEOF
 import json, os

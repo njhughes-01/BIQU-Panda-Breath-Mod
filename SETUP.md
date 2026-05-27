@@ -18,12 +18,10 @@ cd BIQU-Panda-Breath-Mod
 cp .env.example .env
 nano .env        # fill in all Panda + HA credentials (see .env.example for all fields)
 
-mkdir -p certs && bash cert_gen.sh && mv cert.pem key.pem certs/
-
 docker compose up -d
 ```
 
-All Panda configuration is read from `.env` at container startup — no need to edit `panda_config.json`.
+All configuration is read from `.env` at container startup. TLS certificates are generated automatically on first run and persisted in a Docker volume — no manual cert generation needed.
 
 ## Also have an Elegoo Centauri Carbon 2?
 
