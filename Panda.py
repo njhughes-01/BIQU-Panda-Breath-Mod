@@ -565,13 +565,17 @@ def on_mqtt_message(client, userdata, msg):
 
 def setup_mqtt_discovery():
     base, dev = MQTT_TOPIC_PREFIX, {"identifiers": [PRINTER_SN], "name": "Panda Breath Mod", "model": "V6.8 Final", "manufacturer": "Biqu"}
-    for sfx, name in [("soll", "Chamber Target"), ("limit", "Bed Limit"), ("filtertemp", "Filter Fan Activation"), ("dry_temp", "Drying Temp"), ("dry_time", "Drying Time")]:
+    for sfx, name, unit, icon, mn, mx in [
+        ("soll",       "Chamber Target",       "°C",  "mdi:thermometer",  1,  80),
+        ("limit",      "Bed Limit",             "°C",  "mdi:thermometer",  1, 120),
+        ("filtertemp", "Filter Fan Activation", "°C",  "mdi:fan-clock",    1, 120),
+        ("dry_temp",   "Drying Temp",           "°C",  "mdi:thermometer",  1,  80),
+        ("dry_time",   "Drying Time",           "min", "mdi:timer-outline", 1, 480),
+    ]:
         u_id = f"pb_v66_{PRINTER_SN}_{sfx}"
-        unit = "h" if "time" in sfx else "°C"
-        icon = "mdi:fan-clock" if "filter" in sfx else "mdi:thermometer"
         mqtt_client.publish(f"homeassistant/number/{u_id}/config", json.dumps({
             "name": name, "state_topic": f"{base}/{sfx}", "command_topic": f"{base}/{sfx}/set",
-            "unique_id": u_id, "device": dev, "min": 1, "max": 120 if ("limit" in sfx or "filter" in sfx) else 80,
+            "unique_id": u_id, "device": dev, "min": mn, "max": mx,
             "unit_of_measurement": unit, "icon": icon, "mode": "box"
         }), retain=True)
 
@@ -589,10 +593,10 @@ def setup_mqtt_discovery():
         "name": "Chamber", "state_topic": f"{base}/ist", "unique_id": f"{PRINTER_SN}_kammer_ist", "unit_of_measurement": "°C", "device_class": "temperature", "device": dev
     }), retain=True)
 
-    for b in ["manual", "auto", "drying"]:
-        mqtt_client.publish(f"homeassistant/button/pb_v66_{b}/config", json.dumps({
-            "name": f"Panda {b.capitalize()}", "command_topic": f"{base}/{b}/set", "unique_id": f"pb_v66_{b}", "device": dev
-        }), retain=True)
+    mqtt_client.publish(f"homeassistant/binary_sensor/{base}_heizung/config", json.dumps({
+        "name": "Heating Active", "state_topic": f"{base}/heizung", "unique_id": f"{PRINTER_SN}_heizung",
+        "device": dev, "payload_on": "ON", "payload_off": "OFF", "device_class": "heat", "icon": "mdi:radiator"
+    }), retain=True)
 
     mqtt_client.publish(f"homeassistant/sensor/{base}_status/config", json.dumps({
         "name": "Panda Heat Status", "state_topic": f"{base}/status", "unique_id": f"pb_v66_{PRINTER_SN}_status", "device": dev, "icon": "mdi:fire-circle"
@@ -612,10 +616,6 @@ def setup_mqtt_discovery():
 
     mqtt_client.publish(f"homeassistant/button/{base}_heizung_stop/config", json.dumps({
         "name": "Heat Stop", "command_topic": f"{base}/heizung_stop/set", "unique_id": f"{PRINTER_SN}_heizung_stop_btn", "device": dev, "icon": "mdi:radiator-off"
-    }), retain=True)
-
-    mqtt_client.publish(f"homeassistant/sensor/{base}_slicer_soll/config", json.dumps({
-        "name": "Slicer Setpoint", "state_topic": f"{base}/slicer_soll", "unique_id": f"{PRINTER_SN}_slicer_soll_sns", "device": dev, "unit_of_measurement": "°C", "device_class": "temperature"
     }), retain=True)
 
     mqtt_client.publish(f"homeassistant/sensor/{base}_slicer_target_temp/config", json.dumps({
