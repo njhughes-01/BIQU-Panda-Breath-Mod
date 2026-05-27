@@ -158,12 +158,9 @@ When **Slicer Priority Mode = ON**:
 
 # 🐳 Docker Deployment (Recommended)
 
-Runs the Panda backend and the Elegoo CC2 backend as separate containers.
 No Python environment setup required on the host.
 
-## Panda only
-
-Requires: `panda_config.json` (template in repo) + TLS certs
+## Quick start
 
 ```bash
 git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
@@ -175,41 +172,20 @@ mkdir -p certs && bash cert_gen.sh && mv cert.pem key.pem certs/
 docker compose --profile panda up -d
 ```
 
-## Elegoo CC2 only
+## Also have an Elegoo Centauri Carbon 2?
 
-Requires: `.env` (copy from `.env.example`)
+Add CC2 sensor data to Home Assistant by also running the CC2 backend. The CC2 connects directly via its own MQTT broker — no Bambu/cloud server involved.
+
+**Additional requirement:** CC2 must be in LAN-only mode — Settings → Network → LAN Only Mode → Enable
 
 ```bash
-git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
-cd BIQU-Panda-Breath-Mod
-
 cp .env.example .env
 nano .env                       # fill in CC2_IP, CC2_SN, HA MQTT credentials
-
-docker compose --profile cc2 up -d
-```
-
-**CC2 LAN-only mode required** — on the printer: Settings → Network → LAN Only Mode → Enable
-
-## Both
-
-```bash
-git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
-cd BIQU-Panda-Breath-Mod
-
-nano panda_config.json
-mkdir -p certs && bash cert_gen.sh && mv cert.pem key.pem certs/
-cp .env.example .env && nano .env
 
 docker compose --profile panda --profile cc2 up -d
 ```
 
-See **[SETUP.md](SETUP.md)** for full configuration details, Panda Touch binding, and Home Assistant verification steps.
-
-### Elegoo Centauri Carbon 2 support
-
-The CC2 backend (`cc2_connector.py`) bridges the CC2's native MQTT protocol
-into Home Assistant autodiscovery sensors. The printer must be in **LAN-only mode** (Settings → Network → LAN Only Mode) for MQTT to be accessible.
+This publishes 7 sensors to Home Assistant via autodiscovery:
 
 | Sensor | Unit |
 |--------|------|
@@ -221,7 +197,7 @@ into Home Assistant autodiscovery sensors. The printer must be in **LAN-only mod
 | Print Status | — |
 | Print Progress | % |
 
-Configure via `.env` — no code changes needed.
+See **[SETUP.md](SETUP.md)** for full configuration details, Panda Touch binding, and Home Assistant verification steps.
 
 ---
 
