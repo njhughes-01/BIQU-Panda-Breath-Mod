@@ -160,66 +160,60 @@ When **Slicer Priority Mode = ON**:
 
 No Python environment setup required on the host. A pre-built multi-arch image (`linux/amd64`, `linux/arm64`) is published to GitHub Container Registry.
 
-## Quick start
+Choose the setup that matches your printer:
 
-**Standard deployment** (Panda Breath only):
+---
+
+## Setup A — Panda Touch + Klipper/Moonraker
 
 ```bash
 curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/docker-compose.yml
 curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/.env.example
 cp .env.example .env
-nano .env                       # set PANDA_IP, PANDA_SN, PANDA_ACCESS_CODE, HA_TOKEN
+nano .env   # fill in PANDA_IP, PANDA_SN, PANDA_ACCESS_CODE, HA_TOKEN
 
 docker compose up -d
 ```
 
-Docker has stable defaults for internal service addresses: `HA_MQTT_BROKER=mosquitto` and `HA_BASE_URL=http://homeassistant:8123`. Override them in `.env` or Portainer stack environment variables if Home Assistant or Mosquitto are outside this stack. TLS certificates are generated automatically on first run.
-
-To pin to a specific release instead of `:latest`, edit the `image:` line in your compose file:
-
-```yaml
-image: ghcr.io/njhughes-01/biqu-panda-breath-mod:2.0.0
-```
-
-Available tags: [ghcr.io/njhughes-01/biqu-panda-breath-mod](https://github.com/njhughes-01/BIQU-Panda-Breath-Mod/pkgs/container/biqu-panda-breath-mod) — see [CHANGELOG.md](CHANGELOG.md) for what's in each version.
-
-The Docker stack also starts a browser-based Panda control surface:
-
-```text
-http://<DOCKER_HOST>:8088
-```
-
-This web UI controls the backend through the same MQTT topics as Home Assistant. It is not the upstream desktop PySide window; the upstream repo documents `PandaGui.py`, but the checked-in source is backend logic, not a runnable Qt app.
-
-Set the Panda/Bambu binding values as environment variables, either in Portainer or in a local `.env`:
+**Minimum `.env` for this setup:**
 
 ```env
-PANDA_IP=YOUR_PANDA_IP
-PANDA_SN=YOUR_PANDA_SERIAL
-PANDA_ACCESS_CODE=YOUR_ACCESS_CODE
+PANDA_IP=10.0.0.x
+PANDA_SN=YOUR_SERIAL
+PANDA_ACCESS_CODE=YOUR_CODE
+HA_TOKEN=YOUR_HA_TOKEN
 ```
 
-When binding from the Panda UI, do not scan. Use Klipper/direct binding and set `Printer IP` to the Docker host IP (`PANDA_HOST_IP`, or the auto-detected value shown in the container logs). The backend sends `PANDA_SN` and `PANDA_ACCESS_CODE` to the Panda over WebSocket.
+When binding from the Panda Touch UI: use Klipper/direct binding, do not scan. Set `Printer IP` to the Docker host LAN IP (`PANDA_HOST_IP`, or the auto-detected value shown in the `panda_backend` container logs).
 
-The browser UI is exposed by the `panda_web` service on `PANDA_WEB_PORT` (`8088` by default). Control and monitoring are also available through Home Assistant MQTT entities.
+---
 
-## Also have an Elegoo Centauri Carbon 2?
+## Setup B — Panda Touch + Elegoo Centauri Carbon 2
 
-If your printer is an Elegoo Centauri Carbon 2, also run the CC2 backend to feed its sensor data into Home Assistant for use in the Panda Breath automation.
-
-> **LAN-only mode required** — on the CC2: Settings → Network → LAN Only Mode → Enable
-
-Provide `CC2_IP` and `CC2_SN` as stack environment variables or in `.env`. Also fetch the CC2 override file, then start with both compose files:
+> **LAN-only mode required on the CC2:** Settings → Network → LAN Only Mode → Enable
 
 ```bash
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/docker-compose.yml
 curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/docker-compose.cc2.yml
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/.env.example
+cp .env.example .env
+nano .env   # fill in Panda vars + uncomment CC2_IP, CC2_SN
 
 docker compose -f docker-compose.yml -f docker-compose.cc2.yml up -d
 ```
 
-CC2 defaults are already set for `CC2_USER=elegoo`, `CC2_PASS=123456`, and `CC2_TOPIC_PREFIX=cc2`; normally only `CC2_IP` and `CC2_SN` need to be supplied.
+**Minimum `.env` for this setup:**
 
-This publishes 7 sensors to Home Assistant via autodiscovery:
+```env
+PANDA_IP=10.0.0.x
+PANDA_SN=YOUR_PANDA_SERIAL
+PANDA_ACCESS_CODE=YOUR_PANDA_CODE
+HA_TOKEN=YOUR_HA_TOKEN
+CC2_IP=10.0.0.y
+CC2_SN=YOUR_CC2_SERIAL
+```
+
+**CC2 sensors published to Home Assistant:**
 
 | Sensor | Unit |
 |--------|------|
@@ -230,6 +224,18 @@ This publishes 7 sensors to Home Assistant via autodiscovery:
 | Chamber Temperature | °C |
 | Print Status | — |
 | Print Progress | % |
+
+---
+
+## Version pinning
+
+To lock to a specific release, edit the `image:` line in your compose file(s):
+
+```yaml
+image: ghcr.io/njhughes-01/biqu-panda-breath-mod:2.0.0
+```
+
+Available tags: [ghcr.io/njhughes-01/biqu-panda-breath-mod](https://github.com/njhughes-01/BIQU-Panda-Breath-Mod/pkgs/container/biqu-panda-breath-mod) — see [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 
 See **[SETUP.md](SETUP.md)** for full configuration details, Panda Touch binding, and Home Assistant verification steps.
 
