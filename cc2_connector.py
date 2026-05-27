@@ -142,6 +142,16 @@ def request_canvas_info() -> None:
     send_cc2_command(2005)
 
 
+def _retry_canvas_for_active_tray(attempts: int = 5, interval: float = 3.0) -> None:
+    """Background retry loop: re-request canvas info until active_tray_id >= 0."""
+    for _ in range(attempts):
+        time.sleep(interval)
+        if _canvas_info.get("active_tray_id", -1) >= 0:
+            return  # already resolved
+        logger.info("active_tray_id still -1, retrying canvas info request")
+        request_canvas_info()
+
+
 def request_file_list() -> None:
     send_cc2_command(1044)
 
@@ -151,11 +161,18 @@ def publish_active_filament(tray_id: int) -> None:
         return
     canvas = _canvas_info.get("canvas_list", [{}])[0] if _canvas_info else {}
     trays = canvas.get("tray_list", [])
+    filament_type = ""
     if 0 <= tray_id < len(trays):
         filament_type = trays[tray_id].get("filament_type", "")
-        if filament_type:
-            ha_client.publish(f"{CC2_TOPIC_PREFIX}/active_filament_type", filament_type, qos=1, retain=True)
-            logger.info(f"Active filament: tray {tray_id} = {filament_type}")
+    if not filament_type:
+        # Fallback: if exactly one tray has a non-empty filament loaded, use it
+        loaded = [t for t in trays if t.get("filament_type") and t.get("status", 0) == 1]
+        if len(loaded) == 1:
+            filament_type = loaded[0].get("filament_type", "")
+            logger.info(f"active_tray_id unavailable, single loaded tray fallback: {filament_type}")
+    if filament_type:
+        ha_client.publish(f"{CC2_TOPIC_PREFIX}/active_filament_type", filament_type, qos=1, retain=True)
+        logger.info(f"Active filament: tray {tray_id} = {filament_type}")
 
 
 def publish_to_ha() -> None:
@@ -281,6 +298,10 @@ def publish_to_ha() -> None:
         is_printing = current_state in printing_states
         if current_state != _last_print_state:
             logger.info(f"Print state: {_last_print_state!r} → {current_state!r} (machine={machine_code}, sub={machine_code_sub})")
+        if machine_code == 11 and _last_print_state != "file_transferring":
+            # File transfer just started — CC2 is loading the job; good time to check active tray
+            logger.info("File transfer started, pre-fetching canvas info for tray assignment")
+            request_canvas_info()
         if is_printing and not was_printing:
             logger.info(f"Print started (state={print_status}), requesting canvas info")
             request_canvas_info()
@@ -577,6 +598,12 @@ def cc2_on_message(client: Client, userdata: Any, msg: Any) -> None:
                     active_tray = canvas.get("active_tray_id", -1)
                     if active_tray >= 0:
                         publish_active_filament(active_tray)
+                    else:
+                        # CC2 hasn't set active_tray_id yet; retry in background
+                        threading.Thread(
+                            target=_retry_canvas_for_active_tray,
+                            daemon=True
+                        ).start()
                     logger.info(f"Canvas info updated, active_tray_id={active_tray}")
                 return
 
