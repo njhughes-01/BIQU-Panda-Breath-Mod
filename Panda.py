@@ -288,6 +288,17 @@ def on_mqtt_message(client, userdata, msg):
                     current_data["kammer_soll"] = float(target)
                     mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(target), retain=True)
                     log_event(f"[CC2-SLICER] {val} → chamber {target}°C", force_console=True)
+                    if panda_ws and int(target) > 0:
+                        asyncio.run_coroutine_threadsafe(
+                            panda_ws.send(json.dumps({
+                                "settings": {
+                                    "set_temp": int(target),
+                                    "work_on": 1,
+                                    "isrunning": 1
+                                }
+                            })),
+                            main_loop
+                        )
         except Exception:
             pass
         return
