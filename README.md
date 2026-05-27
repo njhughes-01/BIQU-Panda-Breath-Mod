@@ -190,10 +190,8 @@ CC2 credentials, and Home Assistant sensor verification.
 
 ### Elegoo Centauri Carbon 2 support
 
-> **⚠️ LAN-only mode required:** On the CC2, go to **Settings → Network → LAN Only Mode → Enable** before starting the CC2 backend. MQTT is not accessible otherwise.
-
 The CC2 backend (`cc2_connector.py`) bridges the CC2's native MQTT protocol
-into Home Assistant autodiscovery sensors:
+into Home Assistant autodiscovery sensors. The printer must be in **LAN-only mode** (Settings → Network → LAN Only Mode) for MQTT to be accessible.
 
 | Sensor | Unit |
 |--------|------|
