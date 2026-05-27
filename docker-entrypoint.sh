@@ -16,7 +16,7 @@ if [ "$1" = "python3" ] && [ "$2" = "Panda.py" ]; then
             -keyout /app/certs/key.pem \
             -out /app/certs/cert.pem \
             -days 3650 -nodes \
-            -subj "/CN=panda-breath" 2>/dev/null
+            -subj "/CN=panda-breath"
         echo "TLS certificates generated"
     fi
 
