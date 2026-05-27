@@ -23,14 +23,19 @@ This guide covers setup for both the Panda and Elegoo CC2 backends in Docker.
 
 3. **Start services:**
 
-   **Panda only** (no Elegoo CC2):
+   **Panda only:**
    ```bash
-   docker compose up -d
+   docker compose --profile panda up -d
    ```
 
-   **Panda + Elegoo Centauri Carbon 2:**
+   **CC2 only:**
    ```bash
    docker compose --profile cc2 up -d
+   ```
+
+   **Both:**
+   ```bash
+   docker compose --profile panda --profile cc2 up -d
    ```
 
 See individual setup sections below for printer-specific configuration.
@@ -136,7 +141,7 @@ If unreachable, check:
 ### 3. Start CC2 Backend
 
 ```bash
-docker compose up -d cc2_backend
+docker compose --profile cc2 up -d
 ```
 
 ### 4. Verify Connection
@@ -182,7 +187,7 @@ In Home Assistant:
 Start both Panda and CC2 backends together:
 
 ```bash
-docker compose up -d
+docker compose --profile panda --profile cc2 up -d
 ```
 
 View logs:
@@ -224,7 +229,7 @@ docker compose down
 
 - Verify `HA_MQTT_BROKER` and credentials in `.env`
 - Check HA Mosquitto add-on is running: **Settings** → **Add-ons** → **Mosquitto broker**
-- Restart CC2 backend: `docker compose restart cc2_backend`
+- Restart CC2 backend: `docker compose --profile cc2 restart cc2_backend`
 - Check Home Assistant MQTT integration is enabled: **Settings** → **Devices & Services** → **MQTT** → **Configure**
 
 ### No data arriving at HA

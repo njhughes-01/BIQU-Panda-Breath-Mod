@@ -179,10 +179,13 @@ mkdir -p certs && bash cert_gen.sh
 mv cert.pem key.pem certs/
 
 # Panda only
-docker compose up -d
+docker compose --profile panda up -d
 
-# Panda + Elegoo Centauri Carbon 2
+# CC2 only
 docker compose --profile cc2 up -d
+
+# Both
+docker compose --profile panda --profile cc2 up -d
 ```
 
 See **[SETUP.md](SETUP.md)** for the full guide including Panda Touch binding,

@@ -11,6 +11,8 @@ services:
       - "8883:8883"
     env_file:
       - .env
+    profiles:
+      - panda
 
   cc2_backend:
     build: .

@@ -124,9 +124,13 @@ def publish_to_ha() -> None:
             f"{CC2_TOPIC_PREFIX}/print_progress": str(print_progress),
         }
 
+        if not hasattr(publish_to_ha, "_last"):
+            publish_to_ha._last = {}
         for topic, payload in payload_map.items():
-            ha_client.publish(topic, payload, qos=1, retain=False)
-            logger.debug(f"Published {topic} = {payload}")
+            if publish_to_ha._last.get(topic) != payload:
+                ha_client.publish(topic, payload, qos=1, retain=False)
+                publish_to_ha._last[topic] = payload
+                logger.debug(f"Published {topic} = {payload}")
 
     except Exception as e:
         logger.error(f"Error publishing to HA: {e}")
@@ -278,7 +282,7 @@ def cc2_on_message(client: Client, userdata: Any, msg: Any) -> None:
             elif "params" in payload:
                 # Unsolicited Klipper-style notification: params[0] is the status dict
                 params = payload["params"]
-                if isinstance(params, list) and params:
+                if isinstance(params, list) and params and isinstance(params[0], dict):
                     status_data = params[0].get("status", params[0])
             if status_data and isinstance(status_data, dict):
                 with printer_state_lock:
@@ -382,9 +386,9 @@ def main() -> None:
     try:
         cc2_client.reconnect_delay_set(min_delay=5, max_delay=60)
         logger.info(f"Connecting to CC2 MQTT broker at {CC2_IP}:1883")
-        cc2_client.connect(CC2_IP, 1883, keepalive=60)
+        cc2_client.connect_async(CC2_IP, 1883, keepalive=60)
     except Exception as e:
-        logger.error(f"Failed to connect to CC2 MQTT broker: {e}")
+        logger.error(f"Failed to initialize CC2 MQTT connection: {e}")
         sys.exit(1)
 
     # Start heartbeat thread
