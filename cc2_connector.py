@@ -268,7 +268,7 @@ def publish_to_ha() -> None:
 
         for topic, payload in payload_map.items():
             if _last_published.get(topic) != payload:
-                ha_client.publish(topic, payload, qos=1, retain=False)
+                ha_client.publish(topic, payload, qos=1, retain=True)
                 _last_published[topic] = payload
                 logger.debug(f"Published {topic} = {payload}")
 
@@ -716,6 +716,9 @@ def ha_on_connect(client: Client, userdata: Any, connect_flags: Any, rc: int, pr
         client.subscribe(f"{CC2_TOPIC_PREFIX}/+/set", qos=1)
         client.subscribe(f"{CC2_TOPIC_PREFIX}/+/press", qos=1)
         logger.info("Subscribed to HA command topics")
+        # Force republish all state so HA gets current values after any reconnect
+        _last_published.clear()
+        publish_to_ha()
     else:
         logger.error(f"HA connection failed with code {rc}")
 
