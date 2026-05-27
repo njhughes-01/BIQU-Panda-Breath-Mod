@@ -355,6 +355,14 @@ def on_mqtt_message(client, userdata, msg):
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/work_on", "0", retain=True) 
         return
 
+    # --- MODE SELECT (HA dropdown → route to existing handlers) ---
+    if msg.topic == f"{MQTT_TOPIC_PREFIX}/mode_select/set":
+        mode_map = {"Automatic": "auto", "Manual": "manual", "Dry": "drying"}
+        target = mode_map.get(payload_str)
+        if target:
+            mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/{target}/set", "", retain=False)
+        return
+
     # --- MANUELL MODUS ---
     if msg.topic.endswith("/manual/set"):
         log_event(">>> MANUELL MODE ENTERED <<<", force_console=True)
@@ -567,8 +575,14 @@ def setup_mqtt_discovery():
             "unit_of_measurement": unit, "icon": icon, "mode": "box"
         }), retain=True)
 
-    mqtt_client.publish(f"homeassistant/sensor/{base}_panda_modus/config", json.dumps({
-        "name": "Panda Mode", "state_topic": f"{base}/panda_modus", "unique_id": f"{PRINTER_SN}_panda_modus", "device": dev, "icon": "mdi:state-machine"
+    mqtt_client.publish(f"homeassistant/select/{base}_mode_select/config", json.dumps({
+        "name": "Panda Mode",
+        "state_topic": f"{base}/panda_modus",
+        "command_topic": f"{base}/mode_select/set",
+        "options": ["Automatic", "Manual", "Dry"],
+        "unique_id": f"{PRINTER_SN}_mode_select",
+        "device": dev,
+        "icon": "mdi:state-machine"
     }), retain=True)
 
     mqtt_client.publish(f"homeassistant/sensor/{base}_kammer_ist/config", json.dumps({
