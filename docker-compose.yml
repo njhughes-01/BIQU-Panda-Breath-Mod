@@ -7,6 +7,7 @@
 services:
   panda_backend:
     container_name: panda_backend
+    # To pin to a specific release: image: ghcr.io/njhughes-01/biqu-panda-breath-mod:1.9.3
     image: ghcr.io/njhughes-01/biqu-panda-breath-mod:latest
     command: python3 Panda.py
     restart: unless-stopped
@@ -36,6 +37,7 @@ services:
 
   panda_web:
     container_name: panda_web
+    # To pin to a specific release: image: ghcr.io/njhughes-01/biqu-panda-breath-mod:1.9.3
     image: ghcr.io/njhughes-01/biqu-panda-breath-mod:latest
     command: python3 panda_web.py
     restart: unless-stopped

@@ -60,34 +60,14 @@ CERTEOF
     cp /app/certs/cert.pem /app/cert.pem
     cp /app/certs/key.pem /app/key.pem
 
-    python3 - <<PYEOF
-import json, os
-
-config = {
-    "DEBUG": os.environ.get("PANDA_DEBUG", "false").lower() == "true",
-    "DEBUG_TO_FILE": False,
-    "HYSTERESE": float(os.environ.get("PANDA_HYSTERESE", "1.5")),
-    "MIN_SWITCH_TIME": int(os.environ.get("PANDA_MIN_SWITCH_TIME", "10")),
-    "MQTT_BROKER": os.environ.get("HA_MQTT_BROKER", ""),
-    "MQTT_USER": os.environ.get("HA_MQTT_USER", ""),
-    "MQTT_PASS": os.environ.get("HA_MQTT_PASS", ""),
-    "MQTT_TOPIC_PREFIX": os.environ.get("PANDA_MQTT_TOPIC_PREFIX", "panda_breath_mod"),
-    "HOST_IP": os.environ.get("PANDA_HOST_IP", ""),
-    "PANDA_IP": os.environ.get("PANDA_IP", ""),
-    "PRINTER_SN": os.environ.get("PANDA_SN", ""),
-    "ACCESS_CODE": os.environ.get("PANDA_ACCESS_CODE", ""),
-    "HA_BED_TEMPERATURE_ENTITY": os.environ.get("PANDA_HA_BED_ENTITY", "sensor.ks1c_bed_temperature"),
-    "HA_BASE_URL": os.environ.get("HA_BASE_URL", ""),
-    "HA_TOKEN": os.environ.get("HA_TOKEN", ""),
-    "PRINTER_IP": os.environ.get("PANDA_IP", ""),
-    "CC2_TOPIC_PREFIX": os.environ.get("CC2_TOPIC_PREFIX", "cc2"),
-}
-
-with open("/app/panda_config.json", "w") as f:
-    json.dump(config, f, indent=2)
-
-print("Generated panda_config.json from environment variables")
-PYEOF
+    python3 -c "
+import json, os, sys
+sys.path.insert(0, '/app')
+from generate_config import generate_config
+with open('/app/panda_config.json', 'w') as f:
+    json.dump(generate_config(os.environ), f, indent=2)
+print('Generated panda_config.json from environment variables')
+"
 fi
 
 exec "$@"

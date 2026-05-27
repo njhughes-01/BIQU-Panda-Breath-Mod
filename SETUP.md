@@ -68,6 +68,35 @@ See individual setup sections below for full configuration details.
 
 ---
 
+## Environment variables: quick reference
+
+### Standard deployment
+
+| Variable | Required? | Default | Description |
+|----------|-----------|---------|-------------|
+| `PANDA_IP` | **yes** | — | Panda Touch device IP |
+| `PANDA_SN` | **yes** | — | Printer serial number |
+| `PANDA_ACCESS_CODE` | **yes** | — | Printer access code |
+| `HA_TOKEN` | **yes** | — | HA long-lived access token |
+| `HA_MQTT_BROKER` | no | `mosquitto` | Override if MQTT is on a separate host |
+| `HA_MQTT_PORT` | no | `1883` | |
+| `HA_MQTT_USER` / `HA_MQTT_PASS` | no | _(empty)_ | Only if your broker requires auth |
+| `HA_BASE_URL` | no | `http://homeassistant:8123` | Override for external HA |
+| `PANDA_HOST_IP` | no | _auto-detected_ | Docker host LAN IP; auto-detected from `PANDA_IP` |
+| `PANDA_WEB_PORT` | no | `8088` | Host port for browser control UI |
+
+### Additional vars for CC2 deployment (`docker-compose.cc2.yml`)
+
+| Variable | Required? | Default | Description |
+|----------|-----------|---------|-------------|
+| `CC2_IP` | **yes** | — | Elegoo CC2 printer IP |
+| `CC2_SN` | **yes** | — | CC2 serial number |
+| `CC2_USER` | no | `elegoo` | CC2 MQTT username |
+| `CC2_PASS` | no | `123456` | CC2 MQTT password |
+| `CC2_TOPIC_PREFIX` | no | `cc2` | Must match in both `cc2_backend` and `panda_backend` |
+
+---
+
 ## Panda Backend Setup
 
 The Panda backend uses **Panda.py** to communicate with your BIQU Panda printer.
@@ -256,6 +285,14 @@ docker compose -f docker-compose.yml -f docker-compose.cc2.yml down
 - Check printer is on and printing/heating (idle printers may not report all fields)
 - Verify `/cc2/status` topic is `online`: in HA MQTT integration, test publish to `cc2/status` with value `online`
 - Check logs: `docker logs cc2_backend`
+
+### How TLS works in this stack
+
+The Panda backend listens on port 8883 with TLS. Certificates are generated at **container startup**, not at build time, and persisted across restarts in the `panda_certs` Docker volume.
+
+On first run the entrypoint creates a self-signed certificate (2048-bit RSA, CN=panda-breath, valid 10 years) and writes it to the volume. On all subsequent starts the existing cert is reused.
+
+Nothing to configure. To force regeneration: `docker volume rm panda_certs`, then restart the stack.
 
 ### TLS certificate errors (Panda)
 

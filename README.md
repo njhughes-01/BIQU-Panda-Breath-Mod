@@ -175,6 +175,14 @@ docker compose up -d
 
 Docker has stable defaults for internal service addresses: `HA_MQTT_BROKER=mosquitto` and `HA_BASE_URL=http://homeassistant:8123`. Override them in `.env` or Portainer stack environment variables if Home Assistant or Mosquitto are outside this stack. TLS certificates are generated automatically on first run.
 
+To pin to a specific release instead of `:latest`, edit the `image:` line in your compose file:
+
+```yaml
+image: ghcr.io/njhughes-01/biqu-panda-breath-mod:1.9.3
+```
+
+Available tags: [ghcr.io/njhughes-01/biqu-panda-breath-mod](https://github.com/njhughes-01/BIQU-Panda-Breath-Mod/pkgs/container/biqu-panda-breath-mod) — see [CHANGELOG.md](CHANGELOG.md) for what's in each version.
+
 The Docker stack also starts a browser-based Panda control surface:
 
 ```text
