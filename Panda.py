@@ -142,6 +142,7 @@ current_data = {
 ha_memory = {"kammer_soll": 30.0, "bett_limit": 50.0}
 last_ha_change = 0
 panda_ws = None
+panda_writer = None  # asyncio StreamWriter from v1.0.3 TLS path
 main_loop = None
 terminal_cleared = False
 # Merkt sich den letzten vollständigen WS-Settings-Stand
@@ -288,11 +289,11 @@ def on_mqtt_message(client, userdata, msg):
                     current_data["kammer_soll"] = float(target)
                     mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(target), retain=True)
                     log_event(f"[CC2-SLICER] {val} → chamber {target}°C", force_console=True)
-                    if panda_ws and int(target) > 0:
+                    if (panda_ws or panda_writer) and int(target) > 0:
                         async def _cc2_heat(t=int(target)):
-                            await panda_ws.send(json.dumps({"settings": {"isrunning": 0}}))
+                            await panda_send(json.dumps({"settings": {"isrunning": 0}}))
                             await asyncio.sleep(0.2)
-                            await panda_ws.send(json.dumps({
+                            await panda_send(json.dumps({
                                 "settings": {
                                     "work_mode": 2,
                                     "work_on": True,
@@ -301,7 +302,7 @@ def on_mqtt_message(client, userdata, msg):
                                 }
                             }))
                         asyncio.run_coroutine_threadsafe(_cc2_heat(), main_loop)
-                    elif not panda_ws:
+                    elif not panda_ws and not panda_writer:
                         log_event("[CC2-SLICER] Panda not connected, heating queued in kammer_soll", force_console=True)
         except Exception:
             pass
@@ -714,6 +715,20 @@ def setup_mqtt():
 mqtt_client = setup_mqtt()
 log_event("[MQTT] Backend logging topic active", force_console=True)
     
+
+async def panda_send(payload: str) -> None:
+    """Send a JSON command to the Panda device via whichever path is active."""
+    if panda_ws:
+        await panda_ws.send(payload)
+    elif panda_writer and not panda_writer.is_closing():
+        data = payload.encode()
+        # WebSocket text frame: opcode 0x81, length, payload
+        if len(data) < 126:
+            panda_writer.write(bytes([0x81, len(data)]) + data)
+        else:
+            panda_writer.write(bytes([0x81, 126, len(data) >> 8, len(data) & 0xFF]) + data)
+        await panda_writer.drain()
+
 
 # --- WS LOOP (OPTIMIERT: Hält Verbindung bei WiFi-Paketen offen) ---
 async def update_limits_from_ws():
@@ -1149,10 +1164,9 @@ async def update_limits_from_ws():
                         continue
 
         except Exception as e:
-            if DEBUG:
-                err = str(e)
-                if "no close frame received or sent" not in err:
-                    log_event(f"WS-Error: {err}")
+            err = str(e)
+            if "no close frame received or sent" not in err:
+                log_event(f"[WS] Connection error ({PANDA_IP}): {err}", force_console=True)
 
             panda_ws = None
             await asyncio.sleep(5)
@@ -1176,9 +1190,10 @@ async def bind_watchdog():
 # --- EMULATION ---
 async def handle_panda(reader, writer):
 
-    global last_switch_time, global_heating_state, terminal_cleared, mode_change_hint, bed_sensor_error
+    global last_switch_time, global_heating_state, terminal_cleared, mode_change_hint, bed_sensor_error, panda_writer
     setup_mqtt_discovery(mqtt_client)
-    log_event("[SERVER] Panda client connected")
+    panda_writer = writer
+    log_event("[SERVER] Panda client connected", force_console=True)
     try:
         # Initialer Handshake
         await reader.read(1024); writer.write(b'\x20\x02\x00\x00'); await writer.drain()
@@ -1377,7 +1392,9 @@ async def handle_panda(reader, writer):
             await asyncio.sleep(2)
 
     finally:
+        panda_writer = None
         writer.close()
+        log_event("[SERVER] Panda client disconnected", force_console=True)
 
 async def main():
     global main_loop
