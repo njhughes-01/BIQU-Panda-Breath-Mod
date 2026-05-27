@@ -180,17 +180,27 @@ INDEX_HTML = """<!doctype html>
         <b>CC2 Nozzle / Print / Progress</b> — Live metrics from the Elegoo CC2. Only populated when the cc2_backend service is running.
       </div>
       <div>
-        <strong style="color:#fff;display:block;margin-bottom:6px">Slicer Integration (Klipper only)</strong>
-        <b>How it works</b> — When <b>Slicer Priority</b> is ON, the backend polls Moonraker for M191/M141 commands in the active G-code. When a chamber temp command is detected, it automatically sets the Chamber Target to match — no manual input needed.<br><br>
-        <b>OrcaSlicer setup</b> — In OrcaSlicer, go to <em>Filament → Custom G-code → Start G-code</em> and add <code>M191 S[chamber_temperature]</code>. Set your desired chamber temp per filament profile under <em>Filament → Temperature → Chamber</em>. When you slice and print, OrcaSlicer embeds the temp in the G-code and the backend picks it up automatically.<br><br>
-        <b>Slicer On / Off buttons</b> — Toggle whether slicer-detected temps override the manual Chamber Target.<br><br>
-        <b>Not available on CC2</b> — The Elegoo CC2 does not run Klipper/Moonraker. Slicer Priority mode has no effect when using a CC2. Set your Chamber Target manually or use Auto mode.
+        <strong style="color:#fff;display:block;margin-bottom:6px">Slicer Priority — CC2 (Automatic)</strong>
+        <b>How it works</b> — Enable <b>Slicer Priority Mode</b> in Home Assistant and set the Panda to <b>Auto</b> mode. When a print starts, the cc2_backend reads the active AMS tray's filament type directly from the CC2 and the Panda backend automatically sets the Chamber Target. No OrcaSlicer changes needed.<br><br>
+        <b>Default filament → chamber temp:</b><br>
+        PLA / PLA+ / TPU / TPE → 0°C (off)<br>
+        PETG → 35°C<br>
+        ABS / ASA → 55°C<br>
+        PA → 65°C &nbsp;|&nbsp; PA-CF / PA12-CF / PC → 70°C<br>
+        PC-ABS → 65°C<br><br>
+        <b>Custom overrides</b> — Set the <code>CC2_FILAMENT_MAP</code> env var as JSON to override any value, e.g. <code>&#123;"PETG":"40","ABS":"60"&#125;</code>. Unmapped filaments fall back to the defaults above.
+      </div>
+      <div>
+        <strong style="color:#fff;display:block;margin-bottom:6px">Slicer Priority — Klipper</strong>
+        <b>How it works</b> — When <b>Slicer Priority</b> is ON, the backend polls Moonraker for M191/M141 commands in the active G-code. When detected, it sets the Chamber Target automatically.<br><br>
+        <b>OrcaSlicer setup</b> — In OrcaSlicer go to <em>Filament → Custom G-code → Start G-code</em> and add <code>M191 S[chamber_temperature]</code>. Set your desired chamber temp per filament profile under <em>Filament → Temperature → Chamber</em>. OrcaSlicer embeds the temp in the G-code and the backend picks it up automatically.<br><br>
+        <b>Slicer On / Off buttons</b> — Toggle whether slicer-detected temps override the manual Chamber Target.
       </div>
       <div>
         <strong style="color:#fff;display:block;margin-bottom:6px">Setup: CC2 vs Klipper</strong>
-        <b>Klipper/Moonraker (standard)</b> — Run <code>docker-compose.yml</code> only. Bed temp is read from Home Assistant (sensor entity set in config). Slicer Priority works. You need the HA MQTT integration and Mosquitto broker running.<br><br>
-        <b>Elegoo CC2</b> — Run <code>docker-compose.cc2.yml</code> as your compose file. The cc2_backend connects directly to the CC2 printer and publishes its sensor data to HA via MQTT autodiscovery. Bed temp is sourced from the CC2 live. Slicer Priority is not available.<br><br>
-        <b>To complete automated heating</b> — In either setup, switch the Panda to <b>Auto</b> mode and set a Chamber Target. The heater will run whenever the chamber is below target. For per-filament automation, use a Home Assistant automation that fires on print start and publishes your desired target to <code>panda_breath_mod/soll/set</code>. The backend will apply it immediately.
+        <b>Klipper/Moonraker</b> — Run <code>docker-compose.yml</code>. Bed temp from Home Assistant. Slicer Priority uses M191/M141 from G-code. Requires HA MQTT integration and Mosquitto broker.<br><br>
+        <b>Elegoo CC2</b> — Run <code>docker-compose.cc2.yml</code> as your only compose file. The cc2_backend connects directly to the CC2 and pushes all sensor data to HA via MQTT autodiscovery. Bed temp is live from the CC2. Slicer Priority works automatically via AMS tray filament detection — no G-code changes needed.<br><br>
+        <b>To automate heating</b> — Set Panda to <b>Auto</b> mode and enable <b>Slicer Priority Mode</b> in HA. The heater will track the correct target for each filament type automatically when a print starts.
       </div>
     </div>
   </div>

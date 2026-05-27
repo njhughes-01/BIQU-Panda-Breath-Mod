@@ -28,7 +28,7 @@ This project simulates a **Bambu Lab printer** on a host system (PC / server) an
 - 🔥 Immediate heating in all modes (no bed wait)
 - 🔐 Global lock / unlock safety system
 - ⚡ Stable power sync (no UI bounce or reset)
-- 🧠 Slicer Priority Mode (M191 / M141 detection via Moonraker)
+- 🧠 Slicer Priority Mode — CC2: automatic filament-type detection from AMS tray; Klipper: M191 / M141 via Moonraker
 - 🔄 Full bidirectional MQTT sync (Home Assistant auto-discovery)
 - 🎛 Dry mode support
 - 📊 Live terminal monitor (flicker-free)
@@ -147,16 +147,41 @@ Fixes:
 
 ---
 
-# 🧩 Slicer Integration (OrcaSlicer)
+# 🧩 Slicer Priority Mode
 
-Supports:
+Automatically sets the Chamber Target when a print starts — no manual input needed.
 
-M191 Sxx
-M141 Sxx
+### CC2 Setup (no OrcaSlicer changes required)
 
+Enable **Slicer Priority Mode** in Home Assistant and set Panda to **Auto** mode. When a print starts, the CC2 backend reads the active AMS tray's filament type and maps it to the correct chamber temperature automatically.
 
-When **Slicer Priority Mode = ON**:
-- Automatically sets chamber target
+Default filament → chamber temp mapping:
+
+| Filament | Chamber Target |
+|----------|---------------|
+| PLA, PLA+, TPU, TPE | 0°C (off) |
+| PETG | 35°C |
+| ABS, ASA | 55°C |
+| PA | 65°C |
+| PA-CF, PA12-CF, PC | 70°C |
+| PC-ABS | 65°C |
+
+To override any value, set the `CC2_FILAMENT_MAP` env var as JSON in your `.env`:
+```env
+CC2_FILAMENT_MAP={"PETG":"40","ABS":"60"}
+```
+Unmapped filaments fall back to the defaults above.
+
+### Klipper/Moonraker Setup
+
+When **Slicer Priority Mode = ON**, the backend polls Moonraker for M191/M141 commands in the active G-code:
+
+```
+M191 Sxx   (chamber temp)
+M141 Sxx   (enclosure temp)
+```
+
+**OrcaSlicer:** Go to *Filament → Custom G-code → Start G-code* and add `M191 S[chamber_temperature]`. Set your desired chamber temp per filament profile under *Filament → Temperature → Chamber*.
 
 ---
 
@@ -217,6 +242,8 @@ HA_TOKEN=YOUR_HA_TOKEN
 CC2_IP=10.0.0.y
 CC2_SN=YOUR_CC2_SERIAL
 ```
+
+**Automated slicer priority:** Enable **Slicer Priority Mode** in the Panda Breath Mod HA device and set the Panda to **Auto** mode. When a print starts the system reads the active AMS tray and sets the chamber target automatically — no OrcaSlicer changes needed. See the [Slicer Priority Mode](#-slicer-priority-mode) section for the filament→temp defaults.
 
 **CC2 sensors published to Home Assistant:**
 
