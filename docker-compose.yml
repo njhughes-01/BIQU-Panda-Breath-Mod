@@ -61,5 +61,29 @@ services:
       retries: 3
       start_period: 10s
 
+  panda_web:
+    container_name: panda_web
+    build:
+      context: .
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    command: python3 panda_web.py
+    restart: unless-stopped
+    ports:
+      - "${PANDA_WEB_PORT:-8088}:8080"
+    environment:
+      HA_MQTT_BROKER: ${HA_MQTT_BROKER:-mosquitto}
+      HA_MQTT_PORT: ${HA_MQTT_PORT:-1883}
+      HA_MQTT_USER: ${HA_MQTT_USER:-}
+      HA_MQTT_PASS: ${HA_MQTT_PASS:-}
+      PANDA_MQTT_TOPIC_PREFIX: ${PANDA_MQTT_TOPIC_PREFIX:-panda_breath_mod}
+      PANDA_WEB_INTERNAL_PORT: 8080
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   panda_certs:

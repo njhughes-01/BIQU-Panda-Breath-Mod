@@ -174,6 +174,14 @@ docker compose up -d
 
 Docker has stable defaults for internal service addresses: `HA_MQTT_BROKER=mosquitto` and `HA_BASE_URL=http://homeassistant:8123`. Override them in `.env` or Portainer stack environment variables if Home Assistant or Mosquitto are outside this stack. TLS certificates are generated automatically on first run.
 
+The Docker stack also starts a browser-based Panda control surface:
+
+```text
+http://<DOCKER_HOST>:8088
+```
+
+This web UI controls the backend through the same MQTT topics as Home Assistant. It is not the upstream desktop PySide window; the upstream repo documents `PandaGui.py`, but the checked-in source is backend logic, not a runnable Qt app.
+
 Set the Panda/Bambu binding values as environment variables, either in Portainer or in a local `.env`:
 
 ```env
@@ -184,7 +192,7 @@ PANDA_ACCESS_CODE=YOUR_ACCESS_CODE
 
 When binding from the Panda UI, do not scan. Use Klipper/direct binding and set `Printer IP` to the Docker host IP (`PANDA_HOST_IP`, or the auto-detected value shown in the container logs). The backend sends `PANDA_SN` and `PANDA_ACCESS_CODE` to the Panda over WebSocket.
 
-The desktop **Panda Control GUI** (`PandaGui.py`) is not started by Docker Compose. Docker runs the headless backend; control and monitoring are through Home Assistant MQTT entities or a separate desktop run of `PandaGui.py`.
+The browser UI is exposed by the `panda_web` service on `PANDA_WEB_PORT` (`8088` by default). Control and monitoring are also available through Home Assistant MQTT entities.
 
 ## Also have an Elegoo Centauri Carbon 2?
 

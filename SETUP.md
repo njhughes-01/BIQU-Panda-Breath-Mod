@@ -24,6 +24,14 @@ docker compose up -d
 
 Compose provides stable defaults for internal stack addresses: `HA_MQTT_BROKER=mosquitto`, `HA_BASE_URL=http://homeassistant:8123`, and `HA_MQTT_PORT=1883`. Override them in `.env` or Portainer stack environment variables if Home Assistant or Mosquitto are outside this stack. TLS certificates are generated automatically on first run and persisted in a Docker volume — no manual cert generation needed.
 
+The stack exposes a browser control surface at:
+
+```text
+http://<DOCKER_HOST>:8088
+```
+
+Override the host port with `PANDA_WEB_PORT` if needed.
+
 ## Using an Elegoo Centauri Carbon 2?
 
 If your printer is an Elegoo CC2, run the CC2 backend alongside the Panda backend to publish its sensor data to Home Assistant. The Panda Breath automation can then use the CC2's live temps.
@@ -63,6 +71,7 @@ Docker generates `panda_config.json` inside the container from runtime environme
 | `HA_MQTT_PORT` | no | MQTT broker port | `1883` |
 | `HA_MQTT_USER` / `HA_MQTT_PASS` | if broker requires auth | HA MQTT credentials | empty |
 | `PANDA_MQTT_TOPIC_PREFIX` | no | Topic base prefix | `panda_breath_mod` |
+| `PANDA_WEB_PORT` | no | Host port for browser control UI | `8088` |
 
 ### 2. Register in Panda UI
 
@@ -83,9 +92,9 @@ Look for the generated config message, the auto-detected `PANDA_HOST_IP` if you 
 
 ### Panda Control GUI
 
-Docker Compose runs the headless backend only. The upstream **Panda Control GUI** is `PandaGui.py`, a PySide desktop app, and is not exposed as a web UI by Compose.
+Docker Compose runs the headless backend plus `panda_web`, a browser UI that controls the backend through MQTT.
 
-For Docker deployments, use Home Assistant MQTT entities for control and monitoring. If you need the desktop GUI, run it separately on a machine with Python, PySide6, and access to the same MQTT broker.
+The upstream README describes a desktop **Panda Control GUI** launched with `PandaGui.py`, but the checked-in upstream `PandaGui.py` is backend logic and does not contain Qt/PySide widgets. For Docker deployments, use the `panda_web` service or Home Assistant MQTT entities for control and monitoring.
 
 ---
 
@@ -245,3 +254,4 @@ docker compose down
 - Check container logs: `docker compose logs -f [service_name]`
 - Inspect running env: `docker compose exec [service] env | grep -E "CC2_|HA_MQTT"`
 - Test MQTT connectivity: `mqtt_sub -h <HA_IP> -u user -P pass -t "cc2/#"`
+- Open Panda web control: `http://<DOCKER_HOST>:8088`
