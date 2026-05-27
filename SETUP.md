@@ -4,7 +4,7 @@ This guide covers setup for both the Panda and Elegoo CC2 backends in Docker.
 
 ## Prerequisites
 
-- **Docker** and **Docker Compose** installed
+- **Docker** with **buildx** and **Docker Compose** installed (buildx is included with Docker Desktop and Docker Engine 23+)
 - **Home Assistant** running with **Mosquitto MQTT add-on** enabled
 - **Panda Touch** printer (for Panda backend) or **Elegoo Centauri Carbon 2** (for CC2 backend)
 - Network connectivity between your Docker host and printers/HA instance
