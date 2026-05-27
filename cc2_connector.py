@@ -345,7 +345,7 @@ def publish_ha_autodiscovery() -> None:
         "nozzle_target": {
             "name": "Nozzle Target Temperature",
             "unit_of_measurement": "°C",
-            "device_class": None,
+            "device_class": "temperature",
             "state_class": "measurement",
             "icon": None
         },
@@ -359,7 +359,7 @@ def publish_ha_autodiscovery() -> None:
         "bed_target": {
             "name": "Bed Target Temperature",
             "unit_of_measurement": "°C",
-            "device_class": None,
+            "device_class": "temperature",
             "state_class": "measurement",
             "icon": None
         },
