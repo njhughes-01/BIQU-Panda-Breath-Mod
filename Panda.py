@@ -279,7 +279,7 @@ def on_mqtt_message(client, userdata, msg):
                 "nozzle_temp", "print_status", "print_progress",
                 "filament_detected", "remaining_time", "current_layer",
                 "filename", "z_height", "fan_speed", "box_fan_speed",
-                "led", "has_error",
+                "led", "has_error", "speed_mode", "file_count", "latest_filename",
             ):
                 mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/cc2_{cc2_key}", val, retain=True)
             elif cc2_key == "active_filament_type" and current_data.get("slicer_priority_mode"):

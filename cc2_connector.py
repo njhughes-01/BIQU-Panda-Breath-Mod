@@ -11,7 +11,7 @@ import random
 import threading
 import logging
 import sys
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from paho.mqtt.client import Client
 from paho.mqtt.enums import CallbackAPIVersion
 
@@ -88,6 +88,17 @@ _SUB_STATUS_NAMES: Dict[int, str] = {
     2901: "leveling",   2902: "leveling",
 }
 
+# gcode_move.speed_mode values
+_SPEED_MODE_NAMES: Dict[int, str] = {
+    0: "Silent",
+    1: "Balanced",
+    2: "Sport",
+    3: "Ludicrous",
+}
+
+# Cached file list from CC2
+_file_list: List[str] = []
+
 
 def generate_client_id() -> str:
     """Generate client ID: '0cli' + 5 hex timestamp digits + 3 hex random, truncated to 10 chars."""
@@ -114,12 +125,25 @@ def deep_merge(base: Dict[str, Any], update: Dict[str, Any]) -> Dict[str, Any]:
     return base
 
 
-def request_canvas_info() -> None:
+def send_cc2_command(method: int, params: Optional[Dict[str, Any]] = None) -> None:
     global _request_counter
-    if cc2_client and cc2_client.is_connected():
-        payload = json.dumps({"id": _request_counter, "method": 2005})
-        cc2_client.publish(f"elegoo/{CC2_SN}/{client_id}/api_request", payload, qos=1)
-        _request_counter += 1
+    if not cc2_client or not cc2_client.is_connected():
+        logger.warning(f"CC2 not connected, cannot send method {method}")
+        return
+    msg: Dict[str, Any] = {"id": _request_counter, "method": method}
+    if params is not None:
+        msg["params"] = params
+    cc2_client.publish(f"elegoo/{CC2_SN}/{client_id}/api_request", json.dumps(msg), qos=1)
+    logger.info(f"Sent CC2 command method={method} id={_request_counter}")
+    _request_counter += 1
+
+
+def request_canvas_info() -> None:
+    send_cc2_command(2005)
+
+
+def request_file_list() -> None:
+    send_cc2_command(1044)
 
 
 def publish_active_filament(tray_id: int) -> None:
@@ -210,6 +234,12 @@ def publish_to_ha() -> None:
             exception_status = machine_status_obj.get("exception_status") or []
             has_error = "ON" if exception_status else "OFF"
 
+            speed_mode_code = int(gcode_move.get("speed_mode") or 1)
+            speed_mode = _SPEED_MODE_NAMES.get(speed_mode_code, "Balanced")
+
+        file_count = len(_file_list)
+        latest_filename = _file_list[-1] if _file_list else ""
+
         # Convert progress to percentage (0-100)
         if isinstance(print_progress, (int, float)) and 0 <= float(print_progress) <= 1:
             print_progress = int(float(print_progress) * 100)
@@ -231,6 +261,9 @@ def publish_to_ha() -> None:
             f"{CC2_TOPIC_PREFIX}/box_fan_speed": str(box_fan_speed),
             f"{CC2_TOPIC_PREFIX}/led": led_status,
             f"{CC2_TOPIC_PREFIX}/has_error": has_error,
+            f"{CC2_TOPIC_PREFIX}/speed_mode": speed_mode,
+            f"{CC2_TOPIC_PREFIX}/file_count": str(file_count),
+            f"{CC2_TOPIC_PREFIX}/latest_filename": latest_filename,
         }
 
         for topic, payload in payload_map.items():
@@ -350,19 +383,26 @@ def publish_ha_autodiscovery() -> None:
             "state_class": "measurement",
             "icon": "mdi:axis-z-arrow"
         },
-        "fan_speed": {
-            "name": "Part Cooling Fan",
-            "unit_of_measurement": "%",
-            "device_class": None,
-            "state_class": "measurement",
-            "icon": "mdi:fan"
-        },
         "box_fan_speed": {
             "name": "Enclosure Fan",
             "unit_of_measurement": "%",
             "device_class": None,
             "state_class": "measurement",
             "icon": "mdi:fan"
+        },
+        "file_count": {
+            "name": "Files on Printer",
+            "unit_of_measurement": None,
+            "device_class": None,
+            "state_class": "measurement",
+            "icon": "mdi:folder-multiple-outline"
+        },
+        "latest_filename": {
+            "name": "Latest File",
+            "unit_of_measurement": None,
+            "device_class": None,
+            "state_class": None,
+            "icon": "mdi:file-document-outline"
         },
     }
 
@@ -393,10 +433,13 @@ def publish_ha_autodiscovery() -> None:
         ha_client.publish(discovery_topic, json.dumps(payload), qos=1, retain=True)
         logger.info(f"Published autodiscovery for {sensor_id}")
 
-    # Binary sensors
+    # Remove old fan_speed sensor entity (replaced by number) and led binary_sensor (replaced by switch)
+    ha_client.publish(f"homeassistant/sensor/cc2_fan_speed/config", "", qos=1, retain=True)
+    ha_client.publish(f"homeassistant/binary_sensor/cc2_led/config", "", qos=1, retain=True)
+
+    # Binary sensors (read-only)
     binary_sensors = [
         ("filament_detected", "Filament Detected", "mdi:printer-3d-nozzle", None),
-        ("led",               "LED",               "mdi:led-on",            None),
         ("has_error",         "Printer Error",     "mdi:alert-circle",      "problem"),
     ]
     for sensor_id, name, icon, device_class in binary_sensors:
@@ -419,6 +462,77 @@ def publish_ha_autodiscovery() -> None:
         ha_client.publish(f"homeassistant/binary_sensor/{uid}/config",
                           json.dumps(p), qos=1, retain=True)
         logger.info(f"Published autodiscovery for binary {sensor_id}")
+
+    # Switch: LED control
+    ha_client.publish("homeassistant/switch/cc2_led/config", json.dumps({
+        "unique_id": "cc2_led",
+        "object_id": "cc2_led",
+        "name": "LED",
+        "state_topic": f"{CC2_TOPIC_PREFIX}/led",
+        "command_topic": f"{CC2_TOPIC_PREFIX}/led_control/set",
+        "payload_on": "ON",
+        "payload_off": "OFF",
+        "availability_topic": f"{CC2_TOPIC_PREFIX}/status",
+        "payload_available": "online",
+        "payload_not_available": "offline",
+        "device": device,
+        "icon": "mdi:led-on",
+    }), qos=1, retain=True)
+    logger.info("Published autodiscovery for switch led")
+
+    # Number: Part Cooling Fan speed (0-100%)
+    ha_client.publish("homeassistant/number/cc2_fan_speed/config", json.dumps({
+        "unique_id": "cc2_fan_speed",
+        "object_id": "cc2_fan_speed",
+        "name": "Part Cooling Fan",
+        "state_topic": f"{CC2_TOPIC_PREFIX}/fan_speed",
+        "command_topic": f"{CC2_TOPIC_PREFIX}/fan_speed_control/set",
+        "min": 0, "max": 100, "step": 1,
+        "unit_of_measurement": "%",
+        "availability_topic": f"{CC2_TOPIC_PREFIX}/status",
+        "payload_available": "online",
+        "payload_not_available": "offline",
+        "device": device,
+        "icon": "mdi:fan",
+    }), qos=1, retain=True)
+    logger.info("Published autodiscovery for number fan_speed")
+
+    # Select: Print Speed Mode
+    ha_client.publish("homeassistant/select/cc2_speed_mode/config", json.dumps({
+        "unique_id": "cc2_speed_mode",
+        "object_id": "cc2_speed_mode",
+        "name": "Print Speed Mode",
+        "state_topic": f"{CC2_TOPIC_PREFIX}/speed_mode",
+        "command_topic": f"{CC2_TOPIC_PREFIX}/speed_mode/set",
+        "options": ["Silent", "Balanced", "Sport", "Ludicrous"],
+        "availability_topic": f"{CC2_TOPIC_PREFIX}/status",
+        "payload_available": "online",
+        "payload_not_available": "offline",
+        "device": device,
+        "icon": "mdi:speedometer",
+    }), qos=1, retain=True)
+    logger.info("Published autodiscovery for select speed_mode")
+
+    # Buttons: print control + file list refresh
+    for btn_id, btn_name, btn_icon in [
+        ("pause_print",       "Pause Print",        "mdi:pause"),
+        ("resume_print",      "Resume Print",       "mdi:play"),
+        ("stop_print",        "Stop Print",         "mdi:stop"),
+        ("file_list_refresh", "Refresh File List",  "mdi:refresh"),
+    ]:
+        uid = f"cc2_{btn_id}"
+        ha_client.publish(f"homeassistant/button/{uid}/config", json.dumps({
+            "unique_id": uid,
+            "object_id": uid,
+            "name": btn_name,
+            "command_topic": f"{CC2_TOPIC_PREFIX}/{btn_id}/press",
+            "availability_topic": f"{CC2_TOPIC_PREFIX}/status",
+            "payload_available": "online",
+            "payload_not_available": "offline",
+            "device": device,
+            "icon": btn_icon,
+        }), qos=1, retain=True)
+        logger.info(f"Published autodiscovery for button {btn_id}")
 
 
 def cc2_on_connect(client: Client, userdata: Any, connect_flags: Any, rc: int, properties: Any = None) -> None:
@@ -450,26 +564,58 @@ def cc2_on_message(client: Client, userdata: Any, msg: Any) -> None:
             logger.warning(f"Unexpected non-dictionary payload received on {msg.topic}")
             return
 
-        # Handle canvas info response (method 2005)
-        if "api_response" in msg.topic and payload.get("method") == 2005:
+        # Handle method-specific responses
+        if "api_response" in msg.topic:
+            method = payload.get("method")
             result = payload.get("result", {})
-            if result.get("error_code") == 0:
-                canvas = result.get("canvas_info", {})
-                _canvas_info.update(canvas)
-                active_tray = canvas.get("active_tray_id", -1)
-                if active_tray >= 0:
-                    publish_active_filament(active_tray)
-                logger.info(f"Canvas info updated, active_tray_id={active_tray}")
-            return
+
+            if method == 2005:
+                # Canvas info (AMS tray data)
+                if isinstance(result, dict) and result.get("error_code") == 0:
+                    canvas = result.get("canvas_info", {})
+                    _canvas_info.update(canvas)
+                    active_tray = canvas.get("active_tray_id", -1)
+                    if active_tray >= 0:
+                        publish_active_filament(active_tray)
+                    logger.info(f"Canvas info updated, active_tray_id={active_tray}")
+                return
+
+            elif method == 1044:
+                # File list response
+                global _file_list
+                files = []
+                if isinstance(result, dict):
+                    raw = result.get("files") or result.get("file_list") or result.get("data") or []
+                    if isinstance(raw, list):
+                        files = [
+                            f.get("filename") or f.get("name") or str(f)
+                            for f in raw if isinstance(f, dict)
+                        ]
+                        if not files:
+                            files = [str(f) for f in raw if isinstance(f, str)]
+                _file_list = files
+                logger.info(f"File list updated: {len(_file_list)} files")
+                if _file_list:
+                    logger.info(f"Files: {', '.join(_file_list[:10])}")
+                publish_to_ha()
+                return
+
+            elif method in (1021, 1022, 1023, 1029, 1030, 1031):
+                # Control command acknowledgement
+                err = result.get("error_code") if isinstance(result, dict) else None
+                if err == 0:
+                    logger.info(f"CC2 command method={method} acknowledged OK")
+                else:
+                    logger.warning(f"CC2 command method={method} result: {result}")
+                return
 
         # Handle registration response
         if "register_response" in msg.topic:
             if payload.get("error") == "ok":
-                logger.info("Registration successful, requesting full status and canvas info")
-                client.publish(f"elegoo/{CC2_SN}/{client_id}/api_request",
-                               json.dumps({"id": 1, "method": 1002}), qos=1)
-                client.publish(f"elegoo/{CC2_SN}/{client_id}/api_request",
-                               json.dumps({"id": 2, "method": 2005}), qos=1)
+                logger.info("Registration successful, requesting full status, canvas info, and file list")
+                send_cc2_command(1002)
+                send_cc2_command(2005)
+                send_cc2_command(1044)
             else:
                 logger.error(f"Registration failed: {payload}")
 
@@ -507,13 +653,69 @@ def cc2_on_disconnect(client: Client, userdata: Any, disconnect_flags: Any, rc: 
         logger.warning(f"CC2 disconnected with code {rc}, will reconnect...")
 
 
+def ha_on_message(client: Client, userdata: Any, msg: Any) -> None:
+    """Handle commands from Home Assistant."""
+    global _file_list
+    topic = msg.topic
+    try:
+        payload = msg.payload.decode().strip()
+    except Exception:
+        return
+
+    if topic == f"{CC2_TOPIC_PREFIX}/pause_print/press":
+        logger.info("HA: pause print")
+        send_cc2_command(1021)
+
+    elif topic == f"{CC2_TOPIC_PREFIX}/resume_print/press":
+        logger.info("HA: resume print")
+        send_cc2_command(1023)
+
+    elif topic == f"{CC2_TOPIC_PREFIX}/stop_print/press":
+        logger.info("HA: stop print")
+        send_cc2_command(1022)
+
+    elif topic == f"{CC2_TOPIC_PREFIX}/led_control/set":
+        status = 1 if payload.upper() == "ON" else 0
+        logger.info(f"HA: LED → {'ON' if status else 'OFF'}")
+        send_cc2_command(1029, {"status": status})
+        # Optimistically update state so HA switch reflects immediately
+        val = "ON" if status else "OFF"
+        if ha_client and ha_client.is_connected():
+            ha_client.publish(f"{CC2_TOPIC_PREFIX}/led", val, retain=False)
+
+    elif topic == f"{CC2_TOPIC_PREFIX}/fan_speed_control/set":
+        try:
+            pct = max(0, min(100, int(float(payload))))
+            raw = int(round(pct / 100 * 255))
+            logger.info(f"HA: part cooling fan → {pct}% (raw={raw})")
+            send_cc2_command(1030, {"fans": {"fan": {"speed": raw}}})
+        except ValueError:
+            logger.warning(f"Invalid fan speed value: {payload!r}")
+
+    elif topic == f"{CC2_TOPIC_PREFIX}/speed_mode/set":
+        mode_map = {"Silent": 0, "Balanced": 1, "Sport": 2, "Ludicrous": 3}
+        mode_code = mode_map.get(payload)
+        if mode_code is not None:
+            logger.info(f"HA: speed mode → {payload} ({mode_code})")
+            send_cc2_command(1031, {"speed_mode": mode_code})
+        else:
+            logger.warning(f"Unknown speed mode: {payload!r}")
+
+    elif topic == f"{CC2_TOPIC_PREFIX}/file_list_refresh/press":
+        logger.info("HA: refresh file list")
+        request_file_list()
+
+
 def ha_on_connect(client: Client, userdata: Any, connect_flags: Any, rc: int, properties: Any = None) -> None:
     """Home Assistant MQTT connection callback."""
     if rc == 0:
         logger.info("Connected to HA MQTT broker")
-        # Publish availability and autodiscovery
         client.publish(f"{CC2_TOPIC_PREFIX}/status", "online", qos=1, retain=True)
         publish_ha_autodiscovery()
+        # Subscribe to command topics from HA
+        client.subscribe(f"{CC2_TOPIC_PREFIX}/+/set", qos=1)
+        client.subscribe(f"{CC2_TOPIC_PREFIX}/+/press", qos=1)
+        logger.info("Subscribed to HA command topics")
     else:
         logger.error(f"HA connection failed with code {rc}")
 
@@ -574,6 +776,7 @@ def main() -> None:
             ha_client.username_pw_set(HA_MQTT_USER, HA_MQTT_PASS)
         ha_client.on_connect = ha_on_connect
         ha_client.on_disconnect = ha_on_disconnect
+        ha_client.on_message = ha_on_message
         ha_client.will_set(f"{CC2_TOPIC_PREFIX}/status", "offline", qos=1, retain=True)
         ha_client.reconnect_delay_set(min_delay=10, max_delay=120)
 

@@ -235,6 +235,7 @@ INDEX_HTML = """<!doctype html>
       ['cc2_filename', 'CC2 File'], ['cc2_current_layer', 'CC2 Layer'], ['cc2_remaining_time', 'CC2 ETA'],
       ['cc2_z_height', 'CC2 Z'], ['cc2_filament_detected', 'Filament'], ['cc2_has_error', 'CC2 Error'],
       ['cc2_fan_speed', 'Part Fan'], ['cc2_box_fan_speed', 'Enc Fan'], ['cc2_led', 'CC2 LED'],
+      ['cc2_speed_mode', 'CC2 Speed'], ['cc2_file_count', 'CC2 Files'], ['cc2_latest_filename', 'Last File'],
     ];
     const tiles = document.getElementById('tiles');
     tiles.innerHTML = tileDefs.map(([key, label]) => `<div class="tile"><label>${label}</label><strong id="t_${key}">--</strong></div>`).join('');
