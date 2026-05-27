@@ -176,10 +176,12 @@ INDEX_HTML = """<!doctype html>
         <strong style="color:#fff;display:block;margin-bottom:6px">Status Tiles</strong>
         <b>Status</b> — Current activity: Done, Heating…, Ready, etc.<br><br>
         <b>Chamber (ist)</b> — Live chamber temperature from the device sensor.<br><br>
-        <b>Bed</b> — Bed temperature pulled from Home Assistant.<br><br>
+        <b>Bed</b> — Bed temperature from the CC2 printer (updates live when CC2 backend is running).<br><br>
         <b>Heat</b> — Whether the heating element relay is ON or OFF right now.<br><br>
         <b>Mode</b> — Current operating mode (Automatic / Manual / Dry).<br><br>
-        <b>Panda Power</b> — Physical power relay state.
+        <b>Panda Power</b> — Physical power relay state.<br><br>
+        <b>CC2 Nozzle / Print / Progress</b> — Live metrics from the Elegoo CC2 printer via the CC2 backend. Require the cc2_backend service to be running.<br><br>
+        <b>Slicer On/Off note</b> — Slicer auto-detection reads G-code temperature commands (M191/M141) via the Moonraker/Klipper API. This is <em>not</em> available on the Elegoo CC2 — the Slicer On/Off buttons have no effect when using a CC2.
       </div>
     </div>
   </div>
@@ -209,7 +211,8 @@ INDEX_HTML = """<!doctype html>
     const tileDefs = [
       ['status', 'Status'], ['bed', 'Bed'], ['ist', 'Chamber'], ['heizung', 'Heat'],
       ['fan', 'Fan'], ['panda_modus', 'Mode'], ['panda_power', 'Panda Power'], ['lock_status', 'Lock'],
-      ['version', 'Version'], ['slicer_target_temp', 'Slicer Target']
+      ['version', 'Version'], ['slicer_target_temp', 'Slicer Target'],
+      ['cc2_nozzle_temp', 'CC2 Nozzle'], ['cc2_print_status', 'CC2 Print'], ['cc2_print_progress', 'CC2 Progress'],
     ];
     const tiles = document.getElementById('tiles');
     tiles.innerHTML = tileDefs.map(([key, label]) => `<div class="tile"><label>${label}</label><strong id="t_${key}">--</strong></div>`).join('');

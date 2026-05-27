@@ -80,6 +80,7 @@ config = {
     "HA_BASE_URL": os.environ.get("HA_BASE_URL", ""),
     "HA_TOKEN": os.environ.get("HA_TOKEN", ""),
     "PRINTER_IP": os.environ.get("PANDA_IP", ""),
+    "CC2_TOPIC_PREFIX": os.environ.get("CC2_TOPIC_PREFIX", "cc2"),
 }
 
 with open("/app/panda_config.json", "w") as f:

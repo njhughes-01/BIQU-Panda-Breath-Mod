@@ -87,6 +87,7 @@ HA_TOKEN = CONFIG["HA_TOKEN"]
 # sucht M191 Sxx / M141 Sxx und setzt slicer_soll.
 # ============================================================
 PRINTER_IP = CONFIG["PRINTER_IP"]
+CC2_TOPIC_PREFIX = os.environ.get("CC2_TOPIC_PREFIX", CONFIG.get("CC2_TOPIC_PREFIX", "cc2"))
 # ==========================================
 # current_data nutzt jetzt die exakten Namen aus der Hardware (filament_temp/timer)
 current_data = {
@@ -243,6 +244,21 @@ def on_mqtt_message(client, userdata, msg):
     global desired_power_state
     global power_pending_until
     global global_heating_state
+    # ============================================================
+    # CC2 METRICS — update current_data and forward to panda_breath_mod/ for panda_web
+    # ------------------------------------------------------------
+    if msg.topic.startswith(f"{CC2_TOPIC_PREFIX}/"):
+        cc2_key = msg.topic[len(CC2_TOPIC_PREFIX) + 1:]
+        try:
+            val = msg.payload.decode().strip()
+            if cc2_key == "bed_temp":
+                current_data["bed_temp"] = safe_float(val, current_data.get("bed_temp", 0.0))
+            elif cc2_key in ("nozzle_temp", "print_status", "print_progress"):
+                mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/cc2_{cc2_key}", val, retain=True)
+        except Exception:
+            pass
+        return
+
     # ============================================================
     # ✅ UNLOCK LOGIK (Muss VOR dem Lock-Check kommen!)
     # ------------------------------------------------------------
@@ -544,6 +560,7 @@ def setup_mqtt():
     client.on_message = on_mqtt_message
     client.connect(MQTT_BROKER, 1883, 60)
     client.subscribe(f"{MQTT_TOPIC_PREFIX}/#")
+    client.subscribe(f"{CC2_TOPIC_PREFIX}/#")
     client.loop_start()
     return client
 
@@ -735,22 +752,7 @@ async def update_limits_from_ws():
                                 retain=True
                             )
 
-                        try:
-                            ha_resp = requests.get(
-                                HA_URL,
-                                headers={"Authorization": f"Bearer {HA_TOKEN}"},
-                                timeout=2
-                            )
-                            ha_resp.raise_for_status()
-                            ha_json = ha_resp.json()
-                            if isinstance(ha_json, dict):
-                                raw_state = str(ha_json.get("state", "")).strip()
-                            else:
-                                raw_state = str(ha_json).strip()
-                            current_data["bed_temp"] = safe_float(raw_state, 0.0)
-                        except Exception:
-                            pass
-
+                        # bed_temp is kept current by CC2 MQTT subscription
                         mqtt_client.publish(
                             f"{MQTT_TOPIC_PREFIX}/bed",
                             f"{safe_float(current_data.get('bed_temp', 0)):.1f}",
