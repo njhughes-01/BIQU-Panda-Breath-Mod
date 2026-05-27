@@ -167,8 +167,8 @@ Choose the setup that matches your printer:
 ## Setup A — Panda Touch + Klipper/Moonraker
 
 ```bash
-curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/docker-compose.yml
-curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/.env.example
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/main/.env.example
 cp .env.example .env
 nano .env   # fill in PANDA_IP, PANDA_SN, PANDA_ACCESS_CODE, HA_TOKEN
 
@@ -193,8 +193,8 @@ When binding from the Panda Touch UI: use Klipper/direct binding, do not scan. S
 > **LAN-only mode required on the CC2:** Settings → Network → LAN Only Mode → Enable
 
 ```bash
-curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/docker-compose.cc2.yml -o docker-compose.yml
-curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/.env.example
+curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/main/docker-compose.cc2.yml -o docker-compose.yml
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/main/.env.example
 cp .env.example .env
 nano .env   # fill in Panda vars + uncomment CC2_IP, CC2_SN
 

@@ -17,8 +17,8 @@ The pre-built multi-arch image (`linux/amd64`, `linux/arm64`) is published to Gi
 **Standard deployment** (Panda Breath only — most users):
 
 ```bash
-curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/docker-compose.yml
-curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/.env.example
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/main/.env.example
 cp .env.example .env
 nano .env        # set PANDA_IP, PANDA_SN, PANDA_ACCESS_CODE, HA_TOKEN
 
@@ -28,8 +28,8 @@ docker compose up -d
 **With Elegoo Centauri Carbon 2** (also fetches CC2 sensor data into HA):
 
 ```bash
-curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/docker-compose.cc2.yml -o docker-compose.yml
-curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/.env.example
+curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/main/docker-compose.cc2.yml -o docker-compose.yml
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/main/.env.example
 cp .env.example .env
 nano .env        # set Panda vars + uncomment CC2_IP, CC2_SN
 
@@ -60,7 +60,7 @@ If your printer is an Elegoo CC2, run the CC2 backend alongside the Panda backen
 Curl the CC2 compose file as `docker-compose.yml`, set `CC2_IP` and `CC2_SN` in `.env`, then start the stack:
 
 ```bash
-curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/docker-compose.cc2.yml -o docker-compose.yml
+curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/main/docker-compose.cc2.yml -o docker-compose.yml
 docker compose up -d
 ```
 
@@ -193,7 +193,7 @@ If unreachable, check:
 If you haven't already curled the CC2 compose file:
 
 ```bash
-curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/docker-compose.cc2.yml -o docker-compose.yml
+curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/main/docker-compose.cc2.yml -o docker-compose.yml
 ```
 
 Start the stack:
