@@ -161,35 +161,50 @@ When **Slicer Priority Mode = ON**:
 Runs the Panda backend and the Elegoo CC2 backend as separate containers.
 No Python environment setup required on the host.
 
-## Quick start
+## Panda only
+
+Requires: `panda_config.json` (template in repo) + TLS certs
 
 ```bash
 git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
 cd BIQU-Panda-Breath-Mod
 
-# Copy and fill in credentials
-cp .env.example .env
-nano .env
+nano panda_config.json          # fill in printer IP, SN, access code, HA URL/token
+mkdir -p certs && bash cert_gen.sh && mv cert.pem key.pem certs/
 
-# Fill in panda_config.json with your Panda printer details
-nano panda_config.json
-
-# Generate TLS certs for the Panda backend
-mkdir -p certs && bash cert_gen.sh
-mv cert.pem key.pem certs/
-
-# Panda only
 docker compose --profile panda up -d
+```
 
-# CC2 only
+## Elegoo CC2 only
+
+Requires: `.env` (copy from `.env.example`)
+
+```bash
+git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
+cd BIQU-Panda-Breath-Mod
+
+cp .env.example .env
+nano .env                       # fill in CC2_IP, CC2_SN, HA MQTT credentials
+
 docker compose --profile cc2 up -d
+```
 
-# Both
+**CC2 LAN-only mode required** — on the printer: Settings → Network → LAN Only Mode → Enable
+
+## Both
+
+```bash
+git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
+cd BIQU-Panda-Breath-Mod
+
+nano panda_config.json
+mkdir -p certs && bash cert_gen.sh && mv cert.pem key.pem certs/
+cp .env.example .env && nano .env
+
 docker compose --profile panda --profile cc2 up -d
 ```
 
-See **[SETUP.md](SETUP.md)** for the full guide including Panda Touch binding,
-CC2 credentials, and Home Assistant sensor verification.
+See **[SETUP.md](SETUP.md)** for full configuration details, Panda Touch binding, and Home Assistant verification steps.
 
 ### Elegoo Centauri Carbon 2 support
 
