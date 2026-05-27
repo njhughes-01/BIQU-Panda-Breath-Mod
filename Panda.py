@@ -134,7 +134,7 @@ current_data = {
     # last_analyzed_file:
     #    - damit wir pro Datei nur einmal analysieren
     # ========================================================
-    "slicer_priority_mode": False,
+    "slicer_priority_mode": True,
     "slicer_soll": 0.0,
     "last_analyzed_file": ""
 }
@@ -595,7 +595,7 @@ def on_mqtt_message(client, userdata, msg):
     except Exception as e:
         log_event(f"[TEMP-SET-ERR] {e}", force_console=True)
 
-def setup_mqtt_discovery():
+def setup_mqtt_discovery(client):
     base, dev = MQTT_TOPIC_PREFIX, {"identifiers": [PRINTER_SN], "name": "Panda Breath Mod", "model": "V6.8 Final", "manufacturer": "Biqu"}
     for sfx, name, unit, icon, mn, mx in [
         ("soll",       "Chamber Target",       "°C",  "mdi:thermometer",  1,  80),
@@ -605,13 +605,13 @@ def setup_mqtt_discovery():
         ("dry_time",   "Drying Time",           "min", "mdi:timer-outline", 1, 480),
     ]:
         u_id = f"pb_v66_{PRINTER_SN}_{sfx}"
-        mqtt_client.publish(f"homeassistant/number/{u_id}/config", json.dumps({
+        client.publish(f"homeassistant/number/{u_id}/config", json.dumps({
             "name": name, "state_topic": f"{base}/{sfx}", "command_topic": f"{base}/{sfx}/set",
             "unique_id": u_id, "device": dev, "min": mn, "max": mx,
             "unit_of_measurement": unit, "icon": icon, "mode": "box"
         }), retain=True)
 
-    mqtt_client.publish(f"homeassistant/select/{base}_mode_select/config", json.dumps({
+    client.publish(f"homeassistant/select/{base}_mode_select/config", json.dumps({
         "name": "Panda Mode",
         "state_topic": f"{base}/panda_modus",
         "command_topic": f"{base}/mode_select/set",
@@ -621,44 +621,44 @@ def setup_mqtt_discovery():
         "icon": "mdi:state-machine"
     }), retain=True)
 
-    mqtt_client.publish(f"homeassistant/sensor/{base}_kammer_ist/config", json.dumps({
+    client.publish(f"homeassistant/sensor/{base}_kammer_ist/config", json.dumps({
         "name": "Chamber", "state_topic": f"{base}/ist", "unique_id": f"{PRINTER_SN}_kammer_ist", "unit_of_measurement": "°C", "device_class": "temperature", "device": dev
     }), retain=True)
 
-    mqtt_client.publish(f"homeassistant/binary_sensor/{base}_heizung/config", json.dumps({
+    client.publish(f"homeassistant/binary_sensor/{base}_heizung/config", json.dumps({
         "name": "Heating Active", "state_topic": f"{base}/heizung", "unique_id": f"{PRINTER_SN}_heizung",
         "device": dev, "payload_on": "ON", "payload_off": "OFF", "device_class": "heat", "icon": "mdi:radiator"
     }), retain=True)
 
-    mqtt_client.publish(f"homeassistant/sensor/{base}_status/config", json.dumps({
+    client.publish(f"homeassistant/sensor/{base}_status/config", json.dumps({
         "name": "Panda Heat Status", "state_topic": f"{base}/status", "unique_id": f"pb_v66_{PRINTER_SN}_status", "device": dev, "icon": "mdi:fire-circle"
     }), retain=True)
 
-    mqtt_client.publish(f"homeassistant/binary_sensor/{base}_fan/config", json.dumps({
+    client.publish(f"homeassistant/binary_sensor/{base}_fan/config", json.dumps({
         "name": "Panda Filter Fan", "state_topic": f"{base}/fan", "unique_id": f"pb_v66_{PRINTER_SN}_fan", "device": dev, "payload_on": "ON", "payload_off": "OFF", "device_class": "fan"
     }), retain=True)
 
-    mqtt_client.publish(f"homeassistant/switch/{base}_panda_power/config", json.dumps({
+    client.publish(f"homeassistant/switch/{base}_panda_power/config", json.dumps({
         "name": "Panda Power", "state_topic": f"{base}/panda_power", "command_topic": f"{base}/panda_power/set", "unique_id": f"{PRINTER_SN}_panda_power_sw", "device": dev, "payload_on": "ON", "payload_off": "OFF", "icon": "mdi:power"
     }), retain=True)
 
-    mqtt_client.publish(f"homeassistant/switch/{base}_slicer_priority_mode/config", json.dumps({
+    client.publish(f"homeassistant/switch/{base}_slicer_priority_mode/config", json.dumps({
         "name": "Slicer Priority Mode", "state_topic": f"{base}/slicer_priority_mode", "command_topic": f"{base}/slicer_priority_mode/set", "unique_id": f"{PRINTER_SN}_slicer_priority_mode_sw", "device": dev, "payload_on": "ON", "payload_off": "OFF", "icon": "mdi:priority-high"
     }), retain=True)
 
-    mqtt_client.publish(f"homeassistant/button/{base}_heizung_stop/config", json.dumps({
+    client.publish(f"homeassistant/button/{base}_heizung_stop/config", json.dumps({
         "name": "Heat Stop", "command_topic": f"{base}/heizung_stop/set", "unique_id": f"{PRINTER_SN}_heizung_stop_btn", "device": dev, "icon": "mdi:radiator-off"
     }), retain=True)
 
-    mqtt_client.publish(f"homeassistant/sensor/{base}_slicer_target_temp/config", json.dumps({
+    client.publish(f"homeassistant/sensor/{base}_slicer_target_temp/config", json.dumps({
         "name": "Slicer Target Temp", "state_topic": f"{base}/slicer_target_temp", "unique_id": f"{PRINTER_SN}_slicer_target_temp_sns", "device": dev, "unit_of_measurement": "°C", "device_class": "temperature"
     }), retain=True)
 
-    mqtt_client.publish(f"homeassistant/sensor/{base}_version/config", json.dumps({
+    client.publish(f"homeassistant/sensor/{base}_version/config", json.dumps({
         "name": "Panda Version", "state_topic": f"{base}/version", "unique_id": f"{PRINTER_SN}_panda_version", "device": dev, "icon": "mdi:information-outline"
     }), retain=True)
 
-    mqtt_client.publish(f"homeassistant/sensor/{base}_lock_status/config", json.dumps({
+    client.publish(f"homeassistant/sensor/{base}_lock_status/config", json.dumps({
         "name": "Panda Lock Status",
         "state_topic": f"{base}/lock_status",
         "unique_id": f"{PRINTER_SN}_lock_status",
@@ -666,7 +666,7 @@ def setup_mqtt_discovery():
         "icon": "mdi:lock"
     }), retain=True)
 
-    mqtt_client.publish(f"homeassistant/button/{base}_unlock/config", json.dumps({
+    client.publish(f"homeassistant/button/{base}_unlock/config", json.dumps({
         "name": "Panda Unlock",
         "command_topic": f"{base}/unlock/set",
         "unique_id": f"{PRINTER_SN}_unlock_btn",
@@ -677,8 +677,11 @@ def setup_mqtt_discovery():
 
 def _on_mqtt_connect(client, userdata, flags, reason_code, properties):
     if not reason_code.is_failure:
-        setup_mqtt_discovery()
+        setup_mqtt_discovery(client)
         log_event("[MQTT] HA autodiscovery published", force_console=True)
+        # Republish slicer priority state so HA always reflects current value
+        slicer_state = "ON" if current_data.get("slicer_priority_mode") else "OFF"
+        client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_priority_mode", slicer_state, retain=True)
 
 
 def setup_mqtt():
