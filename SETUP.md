@@ -14,7 +14,7 @@ This guide covers Docker setup for the Panda Breath mod. The Panda backend autom
 
 The pre-built multi-arch image (`linux/amd64`, `linux/arm64`) is published to GitHub Container Registry. No local build required.
 
-**Standard deployment** (Panda Breath only — most users):
+**Setup A — Klipper/Moonraker** (Panda Touch optional):
 
 ```bash
 curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/main/docker-compose.yml
@@ -25,7 +25,7 @@ nano .env        # set PANDA_IP, PANDA_SN, PANDA_ACCESS_CODE, HA_TOKEN
 docker compose up -d
 ```
 
-**With Elegoo Centauri Carbon 2** (also fetches CC2 sensor data into HA):
+**Setup B — Elegoo Centauri Carbon 2** (no Panda Touch required):
 
 ```bash
 curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/main/docker-compose.cc2.yml -o docker-compose.yml
@@ -78,7 +78,7 @@ See individual setup sections below for full configuration details.
 
 | Variable | Required? | Default | Description |
 |----------|-----------|---------|-------------|
-| `PANDA_IP` | **yes** | — | Panda Touch device IP |
+| `PANDA_IP` | **yes** | — | IP of the device running Klipper/Moonraker (Setup A) or your printer host |
 | `PANDA_SN` | **yes** | — | Printer serial number |
 | `PANDA_ACCESS_CODE` | **yes** | — | Printer access code |
 | `HA_TOKEN` | **yes** | — | HA long-lived access token |
@@ -111,7 +111,7 @@ Docker generates `panda_config.json` inside the container from runtime environme
 
 | Variable | Required? | Description | Default |
 |----------|-----------|-------------|---------|
-| `PANDA_IP` | yes | Panda device IP, WebSocket at `ws://{IP}/ws` | none |
+| `PANDA_IP` | yes | Printer/host IP (Klipper setup). Not used for CC2-only deployments. | none |
 | `PANDA_SN` | yes | Panda/Bambu serial number used for binding | none |
 | `PANDA_ACCESS_CODE` | yes | Panda/Bambu access code | none |
 | `PANDA_HOST_IP` | usually no | Docker host LAN IP to register in Panda UI | auto-detected from `PANDA_IP` when possible |
@@ -123,14 +123,15 @@ Docker generates `panda_config.json` inside the container from runtime environme
 | `PANDA_MQTT_TOPIC_PREFIX` | no | Topic base prefix | `panda_breath_mod` |
 | `PANDA_WEB_PORT` | no | Host port for browser control UI | `8088` |
 
-### 2. Register in Panda UI
+### 2. Register in Panda UI (optional — only if you have a Panda Touch display)
 
-1. Open Panda Touch UI
-2. Use Klipper/direct binding; do not use scan
-3. Set `Printer IP` to `PANDA_HOST_IP`
-4. Connect — Panda will establish WebSocket to the Docker host on port 8883
+A Panda Touch is **not required**. The chamber heater automation, MQTT control, and the browser UI at port 8088 all work without one.
 
-The serial number and access code are provided by the Docker backend from `.env` as `PANDA_SN` and `PANDA_ACCESS_CODE`. If a Bambu printer-type screen does not expose SN/access-code fields, use the Klipper/direct binding path and let the backend send those values.
+If you do have a Panda Touch:
+1. Open the Panda Touch UI
+2. Use Klipper/direct binding — do not scan
+3. Set `Printer IP` to `PANDA_HOST_IP` (shown in `panda_backend` logs)
+4. The backend handles the WebSocket connection on port 8883
 
 ### 3. Verify Connection
 
@@ -279,7 +280,7 @@ docker compose down
 
 **Error:** `Connection refused` or `ws: unexpected close`
 
-- Verify Panda Touch registered in its UI with correct `PANDA_HOST_IP`
+- If using a Panda Touch, verify it is registered with correct `PANDA_HOST_IP`
 - Check firewall allows inbound port 8883
 - Verify the `panda_certs` Docker volume exists and the container can copy `/app/certs/cert.pem` and `/app/certs/key.pem`
 
@@ -312,7 +313,7 @@ Nothing to configure. To force regeneration: `docker volume rm panda_certs`, the
 
 **Error:** `SSL: CERTIFICATE_VERIFY_FAILED`
 
-- Panda Touch may not verify self-signed certs — this is normal
+- If using a Panda Touch, it may not verify self-signed certs — this is normal
 - Verify the `panda_certs` Docker volume exists and the container can copy `/app/certs/cert.pem` and `/app/certs/key.pem`
 
 ---

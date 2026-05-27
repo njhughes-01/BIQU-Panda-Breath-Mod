@@ -81,9 +81,13 @@ Printer IP → 192.168.8.8
 
 The script emulates a **Bambu-compatible printer** using Panda WebSocket protocol.
 
-**Data flow:**
+**Data flow (Klipper/Moonraker setup):**
 
-Moonraker → Home Assistant → Panda Logic Sync → Panda Touch
+Moonraker → Home Assistant → Panda Logic Sync → MQTT → Chamber Heater
+
+**Data flow (Elegoo CC2 setup):**
+
+CC2 Printer → cc2_backend → Home Assistant MQTT → Panda Logic Sync → Chamber Heater
 
 
 ---
@@ -164,7 +168,7 @@ Choose the setup that matches your printer:
 
 ---
 
-## Setup A — Panda Touch + Klipper/Moonraker
+## Setup A — Klipper/Moonraker (with optional Panda Touch)
 
 ```bash
 curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/main/docker-compose.yml
@@ -184,11 +188,11 @@ PANDA_ACCESS_CODE=YOUR_CODE
 HA_TOKEN=YOUR_HA_TOKEN
 ```
 
-When binding from the Panda Touch UI: use Klipper/direct binding, do not scan. Set `Printer IP` to the Docker host LAN IP (`PANDA_HOST_IP`, or the auto-detected value shown in the `panda_backend` container logs).
+If you have a Panda Touch display: use Klipper/direct binding (do not scan), set `Printer IP` to the Docker host LAN IP shown in the `panda_backend` container logs. A Panda Touch is not required — the system works without one.
 
 ---
 
-## Setup B — Panda Touch + Elegoo Centauri Carbon 2
+## Setup B — Elegoo Centauri Carbon 2 (no Panda Touch required)
 
 > **LAN-only mode required on the CC2:** Settings → Network → LAN Only Mode → Enable
 
@@ -238,7 +242,7 @@ image: ghcr.io/njhughes-01/biqu-panda-breath-mod:2.0.0
 
 Available tags: [ghcr.io/njhughes-01/biqu-panda-breath-mod](https://github.com/njhughes-01/BIQU-Panda-Breath-Mod/pkgs/container/biqu-panda-breath-mod) — see [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 
-See **[SETUP.md](SETUP.md)** for full configuration details, Panda Touch binding, and Home Assistant verification steps.
+See **[SETUP.md](SETUP.md)** for full configuration details and Home Assistant verification steps.
 
 ---
 
