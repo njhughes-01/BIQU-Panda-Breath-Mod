@@ -15,14 +15,15 @@ This guide covers setup for both the Panda and Elegoo CC2 backends in Docker.
 git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
 cd BIQU-Panda-Breath-Mod
 
-# Fill in your Panda printer IP, SN, access code, HA URL and token
-nano panda_config.json
+cp .env.example .env
+nano .env        # fill in all Panda + HA credentials (see .env.example for all fields)
 
-# Generate TLS certs
 mkdir -p certs && bash cert_gen.sh && mv cert.pem key.pem certs/
 
-docker compose --profile panda up -d
+docker compose up -d
 ```
+
+All Panda configuration is read from `.env` at container startup — no need to edit `panda_config.json`.
 
 ## Also have an Elegoo Centauri Carbon 2?
 
@@ -32,12 +33,10 @@ Also run the CC2 backend to publish its sensor data to Home Assistant.
 > On the printer: **Settings → Network → LAN Only Mode → Enable**
 > Without this, the CC2's MQTT broker is not reachable.
 
-```bash
-cp .env.example .env
-# Fill in CC2_IP, CC2_SN, and HA MQTT credentials
-nano .env
+Add the CC2 vars to your `.env`, then:
 
-docker compose --profile panda --profile cc2 up -d
+```bash
+docker compose --profile cc2 up -d
 ```
 
 ---

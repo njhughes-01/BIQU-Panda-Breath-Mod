@@ -166,23 +166,26 @@ No Python environment setup required on the host.
 git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
 cd BIQU-Panda-Breath-Mod
 
-nano panda_config.json          # fill in printer IP, SN, access code, HA URL/token
+cp .env.example .env
+nano .env                       # fill in all Panda + HA credentials
+
 mkdir -p certs && bash cert_gen.sh && mv cert.pem key.pem certs/
 
-docker compose --profile panda up -d
+docker compose up -d
 ```
+
+All Panda configuration is read from `.env` — no need to edit `panda_config.json`.
 
 ## Also have an Elegoo Centauri Carbon 2?
 
 Add CC2 sensor data to Home Assistant by also running the CC2 backend. The CC2 connects directly via its own MQTT broker — no Bambu/cloud server involved.
 
-**Additional requirement:** CC2 must be in LAN-only mode — Settings → Network → LAN Only Mode → Enable
+**CC2 LAN-only mode required** — on the printer: Settings → Network → LAN Only Mode → Enable
+
+Add the CC2 vars to `.env`, then:
 
 ```bash
-cp .env.example .env
-nano .env                       # fill in CC2_IP, CC2_SN, HA MQTT credentials
-
-docker compose --profile panda --profile cc2 up -d
+docker compose --profile cc2 up -d
 ```
 
 This publishes 7 sensors to Home Assistant via autodiscovery:
