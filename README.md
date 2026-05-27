@@ -167,7 +167,7 @@ git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
 cd BIQU-Panda-Breath-Mod
 
 cp .env.example .env
-nano .env                       # fill in all Panda + HA credentials
+nano .env                       # fill in Panda + HA credentials
 
 docker compose up -d
 ```
@@ -176,9 +176,9 @@ All configuration is read from `.env`. TLS certificates are generated automatica
 
 ## Also have an Elegoo Centauri Carbon 2?
 
-Add CC2 sensor data to Home Assistant by also running the CC2 backend. The CC2 connects directly via its own MQTT broker — no Bambu/cloud server involved.
+If your printer is an Elegoo Centauri Carbon 2, also run the CC2 backend to feed its sensor data into Home Assistant for use in the Panda Breath automation.
 
-**CC2 LAN-only mode required** — on the printer: Settings → Network → LAN Only Mode → Enable
+> **LAN-only mode required** — on the CC2: Settings → Network → LAN Only Mode → Enable
 
 Add the CC2 vars to `.env`, then:
 

@@ -1,12 +1,13 @@
 # Panda Breath Mod Setup Guide
 
-This guide covers setup for both the Panda and Elegoo CC2 backends in Docker.
+This guide covers Docker setup for the Panda Breath mod. The Panda backend is required — it automates your Panda Breath chamber heater using real-time Home Assistant data. If your printer is an Elegoo Centauri Carbon 2, also run the CC2 backend to feed its sensor data into the automation.
 
 ## Prerequisites
 
 - **Docker** with **buildx** and **Docker Compose** installed (buildx is included with Docker Desktop and Docker Engine 23+)
 - **Home Assistant** running with **Mosquitto MQTT add-on** enabled
-- **Panda Touch** printer (for Panda backend) or **Elegoo Centauri Carbon 2** (for CC2 backend)
+- **BIQU Panda Breath** hardware (required)
+- **Elegoo Centauri Carbon 2** (optional — for CC2 sensor data in HA)
 - Network connectivity between your Docker host and printers/HA instance
 
 ## Quick Start
@@ -23,12 +24,11 @@ docker compose up -d
 
 All configuration is read from `.env` at container startup. TLS certificates are generated automatically on first run and persisted in a Docker volume — no manual cert generation needed.
 
-## Also have an Elegoo Centauri Carbon 2?
+## Using an Elegoo Centauri Carbon 2?
 
-Also run the CC2 backend to publish its sensor data to Home Assistant.
+If your printer is an Elegoo CC2, run the CC2 backend alongside the Panda backend to publish its sensor data to Home Assistant. The Panda Breath automation can then use the CC2's live temps.
 
-> **⚠️ LAN-only mode required**
-> On the printer: **Settings → Network → LAN Only Mode → Enable**
+> **LAN-only mode required** — on the CC2: **Settings → Network → LAN Only Mode → Enable**
 > Without this, the CC2's MQTT broker is not reachable.
 
 Add the CC2 vars to your `.env`, then:
