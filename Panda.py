@@ -552,7 +552,7 @@ log_event("[MQTT] Backend logging topic active", force_console=True)
 
 def setup_mqtt_discovery():
     base, dev = MQTT_TOPIC_PREFIX, {"identifiers": [PRINTER_SN], "name": "Panda Breath Mod", "model": "V6.8 Final", "manufacturer": "Biqu"}
-    for sfx, name in [("soll", "Kammer Soll"), ("limit", "Bett Limit"), ("filtertemp", "Filter Fan Activation"), ("dry_temp", "Drying Temp"), ("dry_time", "Drying Time")]:
+    for sfx, name in [("soll", "Chamber Target"), ("limit", "Bed Limit"), ("filtertemp", "Filter Fan Activation"), ("dry_temp", "Drying Temp"), ("dry_time", "Drying Time")]:
         u_id = f"pb_v66_{PRINTER_SN}_{sfx}"
         unit = "h" if "time" in sfx else "°C"
         icon = "mdi:fan-clock" if "filter" in sfx else "mdi:thermometer"
@@ -567,7 +567,7 @@ def setup_mqtt_discovery():
     }), retain=True)
        
     mqtt_client.publish(f"homeassistant/sensor/{base}_kammer_ist/config", json.dumps({
-        "name": "Kammer Ist", "state_topic": f"{base}/ist", "unique_id": f"{PRINTER_SN}_kammer_ist", "unit_of_measurement": "°C", "device_class": "temperature", "device": dev
+        "name": "Chamber", "state_topic": f"{base}/ist", "unique_id": f"{PRINTER_SN}_kammer_ist", "unit_of_measurement": "°C", "device_class": "temperature", "device": dev
     }), retain=True)
     
     for b in ["manual", "auto", "drying"]:
@@ -596,7 +596,7 @@ def setup_mqtt_discovery():
     }), retain=True)
 
     mqtt_client.publish(f"homeassistant/sensor/{base}_slicer_soll/config", json.dumps({
-        "name": "Slicer Soll", "state_topic": f"{base}/slicer_soll", "unique_id": f"{PRINTER_SN}_slicer_soll_sns", "device": dev, "unit_of_measurement": "°C", "device_class": "temperature"
+        "name": "Slicer Setpoint", "state_topic": f"{base}/slicer_soll", "unique_id": f"{PRINTER_SN}_slicer_soll_sns", "device": dev, "unit_of_measurement": "°C", "device_class": "temperature"
     }), retain=True)
 
     mqtt_client.publish(f"homeassistant/sensor/{base}_slicer_target_temp/config", json.dumps({
