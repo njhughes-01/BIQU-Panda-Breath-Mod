@@ -91,8 +91,20 @@ CC2_IP = os.environ.get("CC2_IP", "")
 CC2_TOPIC_PREFIX = os.environ.get("CC2_TOPIC_PREFIX", CONFIG.get("CC2_TOPIC_PREFIX", "cc2"))
 
 # Filament type → chamber target (°C). Override via CC2_FILAMENT_MAP env var (JSON).
-_DEFAULT_FILAMENT_MAP = {"PLA": 0, "PLA+": 0, "PETG": 35, "ABS": 50, "ASA": 55,
-                         "PA": 65, "PA-CF": 65, "PC": 60, "TPU": 0, "TPE": 0}
+_DEFAULT_FILAMENT_MAP = {
+    "PLA":    0,   # no chamber heat — heat creep risk
+    "PLA+":   0,
+    "PETG":   35,  # light warmth improves adhesion
+    "ABS":    55,  # warp-prone; needs consistent heat
+    "ASA":    55,  # same family as ABS
+    "PA":     65,  # nylon; hygroscopic, needs hot chamber
+    "PA-CF":  70,  # CF variant runs slightly hotter
+    "PA12-CF":70,
+    "PC":     70,  # polycarbonate; needs aggressive heat
+    "PC-ABS": 65,
+    "TPU":    0,   # flexible; no chamber heat needed
+    "TPE":    0,
+}
 try:
     _raw = os.environ.get("CC2_FILAMENT_MAP", "")
     FILAMENT_CHAMBER_MAP = {**_DEFAULT_FILAMENT_MAP, **json.loads(_raw)} if _raw else _DEFAULT_FILAMENT_MAP
