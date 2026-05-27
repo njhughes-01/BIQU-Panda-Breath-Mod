@@ -351,7 +351,7 @@ def on_mqtt_message(client, userdata, msg):
                 )
 
                 log_event(
-                    f"[SLICER] Kammer Soll sofort gesetzt auf {slicer_val}°",
+                    f"[SLICER] Chamber target set to {slicer_val}°",
                     force_console=True
                 )
 
@@ -742,7 +742,7 @@ async def update_limits_from_ws():
         try:
             async with websockets.connect(uri, ping_interval=None, ping_timeout=None, close_timeout=1) as websocket:
 
-                log_event(f"[WS] Verbunden mit Panda {PANDA_IP}")
+                log_event(f"[WS] Connected to Panda {PANDA_IP}")
                 panda_ws = websocket
 
                 # Nur binden wenn NICHT power_forced_off
@@ -1116,9 +1116,9 @@ async def update_limits_from_ws():
                                 last_live_log_time = now
 
                                 log_event(
-                                    f"LIVE | Bed:{bed_ist:.1f}°C | Kammer:{target:.1f}/{ist:.1f}°C | "
+                                    f"LIVE | Bed:{bed_ist:.1f}°C | Chamber:{target:.1f}/{ist:.1f}°C | "
                                     f"Heat:{'ON' if actual_heating else 'OFF'} | "
-                                    f"Fan:{fan_state} | Modus:{work_mode_live} | Status:{info}"
+                                    f"Fan:{fan_state} | Mode:{work_mode_live} | Status:{info}"
                                 )
 
 
@@ -1140,11 +1140,11 @@ async def bind_watchdog():
     await asyncio.sleep(10)
 
     if not bind_confirmed and not bind_warning_shown:
-        log_event("⚠️ Bitte im Panda UI → Bind drücken!", force_console=True)
+        log_event("⚠️ Please press Bind in the Panda UI!", force_console=True)
 
         mqtt_client.publish(
             f"{MQTT_TOPIC_PREFIX}/status",
-            "Bitte im Panda UI 'Bind' drücken",
+            "Please press Bind in the Panda UI",
             retain=True
         )
 
@@ -1155,7 +1155,7 @@ async def handle_panda(reader, writer):
 
     global last_switch_time, global_heating_state, terminal_cleared, mode_change_hint, bed_sensor_error
     setup_mqtt_discovery()
-    log_event("[SERVER] Panda Client verbunden")
+    log_event("[SERVER] Panda client connected")
     try:
         # Initialer Handshake
         await reader.read(1024); writer.write(b'\x20\x02\x00\x00'); await writer.drain()
@@ -1207,7 +1207,7 @@ async def handle_panda(reader, writer):
 
                     # Wenn vorher Fehler war → jetzt wieder OK melden
                     if bed_sensor_error:
-                        log_event("[BED-SENSOR] Verbindung wieder OK", force_console=True)
+                        log_event("[BED-SENSOR] Connection restored", force_console=True)
                         mqtt_client.publish(
                             f"{MQTT_TOPIC_PREFIX}/status",
                             "Ready",
@@ -1223,7 +1223,7 @@ async def handle_panda(reader, writer):
                         log_event(f"[BED-SENSOR-ERR] {ha_err}", force_console=True)
                         mqtt_client.publish(
                             f"{MQTT_TOPIC_PREFIX}/status",
-                            "Check Bed Temperatur Sensor",
+                            "Check Bed Temperature Sensor",
                             retain=True
                         )
                         bed_sensor_error = True
@@ -1305,7 +1305,7 @@ async def handle_panda(reader, writer):
                 sl = int(current_data.get("slicer_soll", 0))
                 sl_prio = "SL-PRIO" if current_data.get("slicer_priority_mode", False) else "NORMAL"
                 lock_indicator = "⚠️ LOCKED ⚠️" if global_lock else "READY"
-                line = f"\r🟢 {lock_indicator} | Bed:{bed_ist}° | Kammer:{target}/{ist}° | Heiz:{'AN' if global_heating_state > 50 else 'AUS'} | Fan:{fan_state} | {info} | {sl_prio}:{sl}°"
+                line = f"\r🟢 {lock_indicator} | Bed:{bed_ist}° | Chamber:{target}/{ist}° | Heat:{'ON' if global_heating_state > 50 else 'OFF'} | Fan:{fan_state} | {info} | {sl_prio}:{sl}°"
                 
                 mode_change_hint = ""
                 if not terminal_cleared: os.system('clear'); terminal_cleared = True
@@ -1368,7 +1368,7 @@ async def main():
     ssl_ctx.set_ciphers('DEFAULT@SECLEVEL=0:ALL')
     
     server = await asyncio.start_server(handle_panda, '0.0.0.0', 8883, ssl=ssl_ctx)
-    log_event(f"[SERVER] TLS Server gestartet auf 8883 (SECLEVEL=0)")
+    log_event(f"[SERVER] TLS server started on 8883 (SECLEVEL=0)")
     print(f"\n🚀 Panda-Logic-Sync {PANDA_VERSION}\n")
     async with server: await server.serve_forever()
 
