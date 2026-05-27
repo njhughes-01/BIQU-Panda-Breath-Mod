@@ -555,20 +555,6 @@ def on_mqtt_message(client, userdata, msg):
     except Exception as e:
         log_event(f"[TEMP-SET-ERR] {e}", force_console=True)
 
-def setup_mqtt():
-    client = mqtt.Client(callback_api_version=CallbackAPIVersion.VERSION2, client_id=f"PandaNative_{PRINTER_SN}")
-    client.username_pw_set(MQTT_USER, MQTT_PASS)
-    client.on_message = on_mqtt_message
-    client.connect(MQTT_BROKER, 1883, 60)
-    client.subscribe(f"{MQTT_TOPIC_PREFIX}/#")
-    if CC2_IP:
-        client.subscribe(f"{CC2_TOPIC_PREFIX}/#")
-    client.loop_start()
-    return client
-
-mqtt_client = setup_mqtt()
-log_event("[MQTT] Backend logging topic active", force_console=True)
-
 def setup_mqtt_discovery():
     base, dev = MQTT_TOPIC_PREFIX, {"identifiers": [PRINTER_SN], "name": "Panda Breath Mod", "model": "V6.8 Final", "manufacturer": "Biqu"}
     for sfx, name in [("soll", "Chamber Target"), ("limit", "Bed Limit"), ("filtertemp", "Filter Fan Activation"), ("dry_temp", "Drying Temp"), ("dry_time", "Drying Time")]:
@@ -584,11 +570,11 @@ def setup_mqtt_discovery():
     mqtt_client.publish(f"homeassistant/sensor/{base}_panda_modus/config", json.dumps({
         "name": "Panda Mode", "state_topic": f"{base}/panda_modus", "unique_id": f"{PRINTER_SN}_panda_modus", "device": dev, "icon": "mdi:state-machine"
     }), retain=True)
-       
+
     mqtt_client.publish(f"homeassistant/sensor/{base}_kammer_ist/config", json.dumps({
         "name": "Chamber", "state_topic": f"{base}/ist", "unique_id": f"{PRINTER_SN}_kammer_ist", "unit_of_measurement": "°C", "device_class": "temperature", "device": dev
     }), retain=True)
-    
+
     for b in ["manual", "auto", "drying"]:
         mqtt_client.publish(f"homeassistant/button/pb_v66_{b}/config", json.dumps({
             "name": f"Panda {b.capitalize()}", "command_topic": f"{base}/{b}/set", "unique_id": f"pb_v66_{b}", "device": dev
@@ -626,7 +612,6 @@ def setup_mqtt_discovery():
         "name": "Panda Version", "state_topic": f"{base}/version", "unique_id": f"{PRINTER_SN}_panda_version", "device": dev, "icon": "mdi:information-outline"
     }), retain=True)
 
-# ✅ NEUE ENTITÄTEN FÜR LOCK-SYSTEM
     mqtt_client.publish(f"homeassistant/sensor/{base}_lock_status/config", json.dumps({
         "name": "Panda Lock Status",
         "state_topic": f"{base}/lock_status",
@@ -642,6 +627,28 @@ def setup_mqtt_discovery():
         "device": dev,
         "icon": "mdi:lock-open-variant"
     }), retain=True)
+
+
+def _on_mqtt_connect(client, userdata, flags, reason_code, properties):
+    if not reason_code.is_failure:
+        setup_mqtt_discovery()
+        log_event("[MQTT] HA autodiscovery published", force_console=True)
+
+
+def setup_mqtt():
+    client = mqtt.Client(callback_api_version=CallbackAPIVersion.VERSION2, client_id=f"PandaNative_{PRINTER_SN}")
+    client.username_pw_set(MQTT_USER, MQTT_PASS)
+    client.on_message = on_mqtt_message
+    client.on_connect = _on_mqtt_connect
+    client.connect(MQTT_BROKER, 1883, 60)
+    client.subscribe(f"{MQTT_TOPIC_PREFIX}/#")
+    if CC2_IP:
+        client.subscribe(f"{CC2_TOPIC_PREFIX}/#")
+    client.loop_start()
+    return client
+
+mqtt_client = setup_mqtt()
+log_event("[MQTT] Backend logging topic active", force_console=True)
     
 
 # --- WS LOOP (OPTIMIERT: Hält Verbindung bei WiFi-Paketen offen) ---
