@@ -13,6 +13,11 @@ services:
       - .env
     profiles:
       - panda
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   cc2_backend:
     build: .
@@ -22,3 +27,14 @@ services:
       - .env
     profiles:
       - cc2
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket,os; s=socket.socket(); s.settimeout(2); s.connect((os.environ.get('CC2_IP','localhost'),1883)); s.close()\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

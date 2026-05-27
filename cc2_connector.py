@@ -12,7 +12,7 @@ import threading
 import logging
 import sys
 from typing import Optional, Dict, Any
-from paho.mqtt.client import Client, MQTTMessageInfo
+from paho.mqtt.client import Client
 from paho.mqtt.enums import CallbackAPIVersion
 
 # Configure logging
@@ -45,6 +45,9 @@ ha_client: Optional[Client] = None
 # Client identifiers
 client_id: str = ""
 request_id: str = ""
+
+# State cache for publish_to_ha — only publish changed values
+_last_published: Dict[str, str] = {}
 
 
 def generate_client_id() -> str:
@@ -124,12 +127,10 @@ def publish_to_ha() -> None:
             f"{CC2_TOPIC_PREFIX}/print_progress": str(print_progress),
         }
 
-        if not hasattr(publish_to_ha, "_last"):
-            publish_to_ha._last = {}
         for topic, payload in payload_map.items():
-            if publish_to_ha._last.get(topic) != payload:
+            if _last_published.get(topic) != payload:
                 ha_client.publish(topic, payload, qos=1, retain=False)
-                publish_to_ha._last[topic] = payload
+                _last_published[topic] = payload
                 logger.debug(f"Published {topic} = {payload}")
 
     except Exception as e:
@@ -403,7 +404,10 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info("Shutting down...")
         if ha_client:
-            ha_client.publish(f"{CC2_TOPIC_PREFIX}/status", "offline", qos=1, retain=True)
+            try:
+                ha_client.publish(f"{CC2_TOPIC_PREFIX}/status", "offline", qos=1, retain=True)
+            except Exception:
+                pass
             ha_client.loop_stop()
         cc2_client.loop_stop()
         sys.exit(0)

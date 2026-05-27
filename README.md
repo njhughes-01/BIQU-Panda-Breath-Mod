@@ -214,7 +214,7 @@ Configure via `.env` — no code changes needed.
 
 ## 1. Clone
 ```bash
-git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
+git clone https://github.com/jeng37/BIQU-Panda-Breath-Mod.git
 cd BIQU-Panda-Breath-Mod
 2. Install Dependencies
 sudo apt update
