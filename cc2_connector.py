@@ -150,23 +150,73 @@ def request_file_list() -> None:
     send_cc2_command(1044)
 
 
+def _filament_from_nozzle_temp(target: float) -> str:
+    """Best-guess filament type from nozzle target temperature."""
+    if target <= 0:
+        return ""
+    if target <= 220:
+        return "PLA"
+    if target <= 245:
+        return "PETG"
+    if target <= 265:
+        return "ABS"
+    if target <= 280:
+        return "PA"
+    return "PC"
+
+
+def _filament_from_filename(filename: str) -> str:
+    """Extract filament type from filename if the slicer embedded it."""
+    upper = filename.upper()
+    for material in ("PA-CF", "PA12-CF", "PC-ABS", "PLA+", "ASA", "ABS", "PETG", "PA", "PC", "TPU", "TPE", "PLA"):
+        if material.replace("-", "_") in upper or material in upper:
+            return material
+    return ""
+
+
 def publish_active_filament(tray_id: int) -> None:
     global _last_filament_type
     if not ha_client or not ha_client.is_connected():
         return
     canvas = _canvas_info.get("canvas_list", [{}])[0] if _canvas_info else {}
     trays = canvas.get("tray_list", [])
+
+    # Log raw tray data once so we can see the actual field names the CC2 uses
+    if trays and not _last_filament_type:
+        logger.info(f"[CANVAS DEBUG] raw tray_list[0] keys: {list(trays[0].keys())}, data: {trays[0]}")
+
     filament_type = ""
+
+    # 1. Try by active_tray_id index
     if 0 <= tray_id < len(trays):
-        filament_type = trays[tray_id].get("filament_type", "")
+        tray = trays[tray_id]
+        filament_type = (tray.get("filament_type") or tray.get("material") or
+                         tray.get("type") or tray.get("filament") or "")
+
+    # 2. Scan all trays for any non-empty filament field
     if not filament_type:
-        # Fallback: use the first tray with a non-empty filament_type (CC2 often has active_tray_id=-1)
         for t in trays:
-            ft = t.get("filament_type", "")
+            ft = (t.get("filament_type") or t.get("material") or
+                  t.get("type") or t.get("filament") or "")
             if ft:
                 filament_type = ft
                 logger.info(f"active_tray_id unavailable, using first tray with filament: {filament_type}")
                 break
+
+    # 3. Filename-based detection
+    if not filament_type:
+        current_file = printer_state.get("print_stats", {}).get("filename", "")
+        filament_type = _filament_from_filename(current_file)
+        if filament_type:
+            logger.info(f"Filament type from filename '{current_file}': {filament_type}")
+
+    # 4. Nozzle target temp as last resort
+    if not filament_type:
+        nozzle_target = (printer_state.get("extruder") or {}).get("target", 0)
+        filament_type = _filament_from_nozzle_temp(float(nozzle_target or 0))
+        if filament_type:
+            logger.info(f"Filament type inferred from nozzle target {nozzle_target}°C: {filament_type}")
+
     if filament_type and filament_type != _last_filament_type:
         _last_filament_type = filament_type
         ha_client.publish(f"{CC2_TOPIC_PREFIX}/active_filament_type", filament_type, qos=1, retain=True)
