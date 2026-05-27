@@ -20,7 +20,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("CC2Connector")
 
 # Configuration from environment variables
 CC2_IP = os.environ.get("CC2_IP", "")
@@ -55,6 +55,38 @@ _last_print_state: str = ""
 
 # AMS canvas state
 _canvas_info: Dict[str, Any] = {}
+
+# CC2 machine_status.status numeric codes (from elegoo-homeassistant cc2/const.py)
+_MACHINE_STATUS_NAMES: Dict[int, str] = {
+    0:  "initializing",
+    1:  "idle",
+    2:  "printing",
+    3:  "filament_loading",
+    4:  "filament_loading",
+    5:  "leveling",
+    6:  "calibrating",
+    7:  "resonance_testing",
+    8:  "self_checking",
+    9:  "updating",
+    10: "homing",
+    11: "file_transferring",
+    12: "composing",
+    13: "extruder_operating",
+    14: "error",
+    15: "recovering",
+}
+
+# Sub-status codes when machine_status.status == 2 (printing)
+_SUB_STATUS_NAMES: Dict[int, str] = {
+    1045: "preheating", 1096: "preheating",
+    1405: "preheating", 1906: "preheating",
+    2075: "printing",   2077: "complete",
+    2501: "pausing",    2502: "paused",   2505: "paused",
+    2401: "resuming",   2402: "resuming",
+    2503: "stopping",   2504: "stopped",
+    2801: "homing",     2802: "homing",
+    2901: "leveling",   2902: "leveling",
+}
 
 
 def generate_client_id() -> str:
@@ -134,15 +166,20 @@ def publish_to_ha() -> None:
             # CC2 uses "print_status" (dict) not "print_stats"
             print_status_obj = printer_state.get("print_status") or {}
             state_str = (print_status_obj.get("state") or "").lower().strip()
-            # Fall back to machine_status numeric code when state string is absent
             machine_status_obj = printer_state.get("machine_status") or {}
             machine_code = int(machine_status_obj.get("status") or 0)
+            machine_code_sub = int(machine_status_obj.get("sub_status") or 0)
+
+            # Map machine_code + sub_status to a human-readable state string.
+            # state_str from print_status.state takes priority when present.
             if state_str:
                 print_status = state_str
-            elif machine_code >= 2:
-                print_status = "printing"
+            elif machine_code == 2:
+                # Use sub_status for detailed printing state
+                print_status = _SUB_STATUS_NAMES.get(machine_code_sub, "printing")
             else:
-                print_status = "idle"
+                print_status = _MACHINE_STATUS_NAMES.get(machine_code, "idle")
+
             # Progress lives in machine_status on the CC2
             print_progress = machine_status_obj.get("progress")
             if print_progress is None:
@@ -156,14 +193,16 @@ def publish_to_ha() -> None:
             current_layer = int(print_status_obj.get("current_layer") or 0)
             filename = str(print_status_obj.get("filename") or "")
 
-            gcode_move = printer_state.get("gcode_move") or {}
+            # Prefer gcode_move_inf (CC2 firmware) over gcode_move
+            gcode_move = printer_state.get("gcode_move_inf") or printer_state.get("gcode_move") or {}
             z_height = round(float(gcode_move.get("z") or 0), 2)
 
             fans_obj = printer_state.get("fans") or {}
+            # CC2 fan speeds are 0-255; normalize to 0-100%
             raw_fan = float((fans_obj.get("fan") or {}).get("speed") or 0)
-            fan_speed = int(round(raw_fan * 100 if raw_fan <= 1.0 else raw_fan))
+            fan_speed = int(round(raw_fan / 255 * 100)) if raw_fan > 1 else int(round(raw_fan * 100))
             raw_box = float((fans_obj.get("box_fan") or {}).get("speed") or 0)
-            box_fan_speed = int(round(raw_box * 100 if raw_box <= 1.0 else raw_box))
+            box_fan_speed = int(round(raw_box / 255 * 100)) if raw_box > 1 else int(round(raw_box * 100))
 
             led_obj = printer_state.get("led") or {}
             led_status = "ON" if led_obj.get("status") else "OFF"
@@ -202,12 +241,13 @@ def publish_to_ha() -> None:
 
         # Detect print start → request fresh canvas info to get active tray
         global _last_print_state
-        printing_states = {"printing", "busy", "paused", "pausing", "resuming"}
+        # Include preheating — slicer priority should fire as soon as print job starts
+        printing_states = {"printing", "preheating", "paused", "pausing", "resuming", "stopping"}
         current_state = str(print_status).lower()
         was_printing = _last_print_state in printing_states
         is_printing = current_state in printing_states
         if current_state != _last_print_state:
-            logger.info(f"Print state changed: {_last_print_state!r} → {current_state!r} (machine_code={machine_code})")
+            logger.info(f"Print state: {_last_print_state!r} → {current_state!r} (machine={machine_code}, sub={machine_code_sub})")
         if is_printing and not was_printing:
             logger.info(f"Print started (state={print_status}), requesting canvas info")
             request_canvas_info()
