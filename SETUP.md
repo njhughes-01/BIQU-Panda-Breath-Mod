@@ -28,8 +28,7 @@ docker compose up -d
 **With Elegoo Centauri Carbon 2** (also fetches CC2 sensor data into HA):
 
 ```bash
-curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/docker-compose.yml
-curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/docker-compose.cc2.yml -o docker-compose.override.yml
+curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/docker-compose.cc2.yml -o docker-compose.yml
 curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/.env.example
 cp .env.example .env
 nano .env        # set Panda vars + uncomment CC2_IP, CC2_SN
@@ -37,7 +36,7 @@ nano .env        # set Panda vars + uncomment CC2_IP, CC2_SN
 docker compose up -d
 ```
 
-`docker-compose.override.yml` is automatically merged by Docker Compose — no `-f` flags needed.
+`docker-compose.cc2.yml` is a complete self-contained stack — curl it as `docker-compose.yml` and you're done. Works with Portainer too.
 
 To build from source instead of pulling from GHCR, clone the repo and add `build: { context: . }` to the services in `docker-compose.yml`.
 
@@ -58,14 +57,14 @@ If your printer is an Elegoo CC2, run the CC2 backend alongside the Panda backen
 > **LAN-only mode required** — on the CC2: **Settings → Network → LAN Only Mode → Enable**
 > Without this, the CC2's MQTT broker is not reachable.
 
-Download the CC2 compose override, set `CC2_IP` and `CC2_SN` in `.env`, then start the stack:
+Curl the CC2 compose file as `docker-compose.yml`, set `CC2_IP` and `CC2_SN` in `.env`, then start the stack:
 
 ```bash
-curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/docker-compose.cc2.yml -o docker-compose.override.yml
+curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/docker-compose.cc2.yml -o docker-compose.yml
 docker compose up -d
 ```
 
-Docker Compose automatically merges `docker-compose.override.yml` with `docker-compose.yml`.
+The CC2 compose file is a complete self-contained stack — no second file needed. Works directly in Portainer.
 
 ---
 
@@ -191,13 +190,13 @@ If unreachable, check:
 
 ### 3. Start CC2 Backend
 
-If you haven't already, download the CC2 override file:
+If you haven't already curled the CC2 compose file:
 
 ```bash
-curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/docker-compose.cc2.yml -o docker-compose.override.yml
+curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/docker-compose.cc2.yml -o docker-compose.yml
 ```
 
-Then start the stack (Docker Compose merges the override automatically):
+Start the stack:
 
 ```bash
 docker compose up -d
@@ -243,7 +242,7 @@ In Home Assistant:
 
 ## Running the CC2 variant
 
-With `docker-compose.override.yml` in the same directory as `docker-compose.yml`, Docker Compose merges them automatically. All commands are the same as the standard deployment:
+With `docker-compose.cc2.yml` curled as `docker-compose.yml`, all commands are identical to the standard deployment:
 
 Start all services (Panda backend, web UI, and CC2 backend):
 

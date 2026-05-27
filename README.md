@@ -193,8 +193,7 @@ When binding from the Panda Touch UI: use Klipper/direct binding, do not scan. S
 > **LAN-only mode required on the CC2:** Settings → Network → LAN Only Mode → Enable
 
 ```bash
-curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/docker-compose.yml
-curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/docker-compose.cc2.yml -o docker-compose.override.yml
+curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/docker-compose.cc2.yml -o docker-compose.yml
 curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/v2.0.0/.env.example
 cp .env.example .env
 nano .env   # fill in Panda vars + uncomment CC2_IP, CC2_SN
@@ -202,7 +201,7 @@ nano .env   # fill in Panda vars + uncomment CC2_IP, CC2_SN
 docker compose up -d
 ```
 
-`docker-compose.override.yml` is automatically merged by Docker Compose — no `-f` flags needed.
+`docker-compose.cc2.yml` is a complete self-contained stack (Panda backend, web UI, and CC2 backend). Just curl it as `docker-compose.yml` — no second file needed. Works with Portainer too.
 
 **Minimum `.env` for this setup:**
 
