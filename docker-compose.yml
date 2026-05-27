@@ -7,8 +7,9 @@ services:
         - linux/arm64
     command: python3 Panda.py
     restart: unless-stopped
-    ports:
-      - "8883:8883"
+    networks:
+      iot:
+        ipv4_address: ${PANDA_MACVLAN_IP:-10.88.88.50}
     env_file:
       - .env
     volumes:
@@ -45,3 +46,13 @@ services:
 
 volumes:
   panda_certs:
+
+networks:
+  iot:
+    driver: macvlan
+    driver_opts:
+      parent: ${MACVLAN_PARENT:-eth1}
+    ipam:
+      config:
+        - subnet: 10.88.88.0/24
+          gateway: 10.88.88.1
