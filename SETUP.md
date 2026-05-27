@@ -9,36 +9,63 @@ This guide covers setup for both the Panda and Elegoo CC2 backends in Docker.
 - **Panda Touch** printer (for Panda backend) or **Elegoo Centauri Carbon 2** (for CC2 backend)
 - Network connectivity between your Docker host and printers/HA instance
 
-## Quick Start
+## Quick Start — Panda only
 
-1. **Clone and prepare:**
-   ```bash
-   git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
-   cd BIQU-Panda-Breath-Mod
-   cp .env.example .env
-   ```
+**Files required:** `panda_config.json` (template in repo), `certs/cert.pem`, `certs/key.pem`
 
-2. **Configure .env:**
-   Edit `.env` with your Home Assistant MQTT credentials and printer IPs.
+```bash
+git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
+cd BIQU-Panda-Breath-Mod
 
-3. **Start services:**
+# Fill in your Panda printer IP, SN, access code, HA URL and token
+nano panda_config.json
 
-   **Panda only:**
-   ```bash
-   docker compose --profile panda up -d
-   ```
+# Generate TLS certs
+mkdir -p certs && bash cert_gen.sh && mv cert.pem key.pem certs/
 
-   **CC2 only:**
-   ```bash
-   docker compose --profile cc2 up -d
-   ```
+docker compose --profile panda up -d
+```
 
-   **Both:**
-   ```bash
-   docker compose --profile panda --profile cc2 up -d
-   ```
+---
 
-See individual setup sections below for printer-specific configuration.
+## Quick Start — Elegoo CC2 only
+
+**Files required:** `.env` (copy from `.env.example`)
+
+```bash
+git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
+cd BIQU-Panda-Breath-Mod
+
+cp .env.example .env
+# Fill in CC2_IP, CC2_SN, and HA MQTT credentials
+nano .env
+
+docker compose --profile cc2 up -d
+```
+
+> **CC2 LAN-only mode required** — on the printer: Settings → Network → LAN Only Mode → Enable
+
+---
+
+## Quick Start — Both
+
+```bash
+git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
+cd BIQU-Panda-Breath-Mod
+
+# Panda config
+nano panda_config.json
+mkdir -p certs && bash cert_gen.sh && mv cert.pem key.pem certs/
+
+# CC2 + HA MQTT config
+cp .env.example .env && nano .env
+
+docker compose --profile panda --profile cc2 up -d
+```
+
+---
+
+See individual setup sections below for full configuration details.
 
 ---
 

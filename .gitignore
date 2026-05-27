@@ -7,5 +7,4 @@ __pycache__/
 *.pyc
 *.pyo
 panda_debug.log
-panda_config.json
 
