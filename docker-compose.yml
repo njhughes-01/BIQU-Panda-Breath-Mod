@@ -1,11 +1,13 @@
+# Standard deployment: panda_backend + panda_web
+# Pulls pre-built image from GitHub Container Registry — no local build required.
+#
+# To add the Elegoo CC2 backend:
+#   docker compose -f docker-compose.yml -f docker-compose.cc2.yml up -d
+
 services:
   panda_backend:
     container_name: panda_backend
-    build:
-      context: .
-      platforms:
-        - linux/amd64
-        - linux/arm64
+    image: ghcr.io/njhughes-01/biqu-panda-breath-mod:latest
     command: python3 Panda.py
     restart: unless-stopped
     ports:
@@ -32,44 +34,9 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  cc2_backend:
-    container_name: cc2_backend
-    build:
-      context: .
-      platforms:
-        - linux/amd64
-        - linux/arm64
-    command: python3 cc2_connector.py
-    restart: unless-stopped
-    environment:
-      CC2_IP: ${CC2_IP:-}
-      CC2_USER: ${CC2_USER:-elegoo}
-      CC2_PASS: ${CC2_PASS:-123456}
-      CC2_SN: ${CC2_SN:-}
-      CC2_TOPIC_PREFIX: ${CC2_TOPIC_PREFIX:-cc2}
-      HA_MQTT_BROKER: ${HA_MQTT_BROKER:-mosquitto}
-      HA_MQTT_PORT: ${HA_MQTT_PORT:-1883}
-      HA_MQTT_USER: ${HA_MQTT_USER:-}
-      HA_MQTT_PASS: ${HA_MQTT_PASS:-}
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c 'import os; os.kill(1, 0)'"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-
   panda_web:
     container_name: panda_web
-    build:
-      context: .
-      platforms:
-        - linux/amd64
-        - linux/arm64
+    image: ghcr.io/njhughes-01/biqu-panda-breath-mod:latest
     command: python3 panda_web.py
     restart: unless-stopped
     ports:

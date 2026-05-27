@@ -1,0 +1,37 @@
+# CC2 override — adds the Elegoo Centauri Carbon 2 backend service.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.cc2.yml up -d
+#
+# Requirements:
+#   - CC2_IP and CC2_SN must be set in .env or as stack environment variables.
+#   - LAN-only mode must be enabled on the CC2 printer:
+#       Settings -> Network -> LAN Only Mode -> Enable
+
+services:
+  cc2_backend:
+    container_name: cc2_backend
+    image: ghcr.io/njhughes-01/biqu-panda-breath-mod:latest
+    command: python3 cc2_connector.py
+    restart: unless-stopped
+    environment:
+      CC2_IP: ${CC2_IP:-}
+      CC2_USER: ${CC2_USER:-elegoo}
+      CC2_PASS: ${CC2_PASS:-123456}
+      CC2_SN: ${CC2_SN:-}
+      CC2_TOPIC_PREFIX: ${CC2_TOPIC_PREFIX:-cc2}
+      HA_MQTT_BROKER: ${HA_MQTT_BROKER:-mosquitto}
+      HA_MQTT_PORT: ${HA_MQTT_PORT:-1883}
+      HA_MQTT_USER: ${HA_MQTT_USER:-}
+      HA_MQTT_PASS: ${HA_MQTT_PASS:-}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import os; os.kill(1, 0)'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

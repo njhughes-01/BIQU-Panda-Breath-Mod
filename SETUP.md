@@ -12,15 +12,32 @@ This guide covers Docker setup for the Panda Breath mod. The Panda backend autom
 
 ## Quick Start
 
-```bash
-git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
-cd BIQU-Panda-Breath-Mod
+The pre-built multi-arch image (`linux/amd64`, `linux/arm64`) is published to GitHub Container Registry. No local build required.
 
+**Standard deployment** (Panda Breath only — most users):
+
+```bash
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/docker-compose.yml
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/.env.example
 cp .env.example .env
-nano .env        # fill device credentials and any external service addresses
+nano .env        # set PANDA_IP, PANDA_SN, PANDA_ACCESS_CODE, HA_TOKEN
 
 docker compose up -d
 ```
+
+**With Elegoo Centauri Carbon 2** (also fetches CC2 sensor data into HA):
+
+```bash
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/docker-compose.yml
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/docker-compose.cc2.yml
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/.env.example
+cp .env.example .env
+nano .env        # set Panda vars + uncomment CC2_IP, CC2_SN
+
+docker compose -f docker-compose.yml -f docker-compose.cc2.yml up -d
+```
+
+To build from source instead of pulling from GHCR, clone the repo and add `build: { context: . }` to the services in `docker-compose.yml`.
 
 Compose provides stable defaults for internal stack addresses: `HA_MQTT_BROKER=mosquitto`, `HA_BASE_URL=http://homeassistant:8123`, and `HA_MQTT_PORT=1883`. Override them in `.env` or Portainer stack environment variables if Home Assistant or Mosquitto are outside this stack. TLS certificates are generated automatically on first run and persisted in a Docker volume — no manual cert generation needed.
 
@@ -141,7 +158,7 @@ If unreachable, check:
 ### 3. Start CC2 Backend
 
 ```bash
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.cc2.yml up -d
 ```
 
 ### 4. Verify Connection
@@ -182,24 +199,24 @@ In Home Assistant:
 
 ---
 
-## Running Both Services
+## Running the CC2 variant
 
-Start both Panda and CC2 backends together:
+Start all three services together (Panda backend, web UI, and CC2 backend):
 
 ```bash
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.cc2.yml up -d
 ```
 
 View logs:
 
 ```bash
-docker compose logs -f
+docker compose -f docker-compose.yml -f docker-compose.cc2.yml logs -f
 ```
 
 Stop all:
 
 ```bash
-docker compose down
+docker compose -f docker-compose.yml -f docker-compose.cc2.yml down
 ```
 
 ---

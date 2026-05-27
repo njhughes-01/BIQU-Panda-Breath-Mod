@@ -158,16 +158,17 @@ When **Slicer Priority Mode = ON**:
 
 # 🐳 Docker Deployment (Recommended)
 
-No Python environment setup required on the host.
+No Python environment setup required on the host. A pre-built multi-arch image (`linux/amd64`, `linux/arm64`) is published to GitHub Container Registry.
 
 ## Quick start
 
-```bash
-git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
-cd BIQU-Panda-Breath-Mod
+**Standard deployment** (Panda Breath only):
 
+```bash
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/docker-compose.yml
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/.env.example
 cp .env.example .env
-nano .env                       # fill device credentials and any external service addresses
+nano .env                       # set PANDA_IP, PANDA_SN, PANDA_ACCESS_CODE, HA_TOKEN
 
 docker compose up -d
 ```
@@ -200,10 +201,12 @@ If your printer is an Elegoo Centauri Carbon 2, also run the CC2 backend to feed
 
 > **LAN-only mode required** — on the CC2: Settings → Network → LAN Only Mode → Enable
 
-Provide `CC2_IP` and `CC2_SN` as stack environment variables or in `.env`, then start the stack:
+Provide `CC2_IP` and `CC2_SN` as stack environment variables or in `.env`. Also fetch the CC2 override file, then start with both compose files:
 
 ```bash
-docker compose up -d
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/cc2-docker-integration/docker-compose.cc2.yml
+
+docker compose -f docker-compose.yml -f docker-compose.cc2.yml up -d
 ```
 
 CC2 defaults are already set for `CC2_USER=elegoo`, `CC2_PASS=123456`, and `CC2_TOPIC_PREFIX=cc2`; normally only `CC2_IP` and `CC2_SN` need to be supplied.
