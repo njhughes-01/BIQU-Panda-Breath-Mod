@@ -1177,7 +1177,7 @@ async def bind_watchdog():
 async def handle_panda(reader, writer):
 
     global last_switch_time, global_heating_state, terminal_cleared, mode_change_hint, bed_sensor_error
-    setup_mqtt_discovery()
+    setup_mqtt_discovery(mqtt_client)
     log_event("[SERVER] Panda client connected")
     try:
         # Initialer Handshake
