@@ -1,6 +1,6 @@
 # Panda Breath Mod Setup Guide
 
-This guide covers Docker setup for the Panda Breath mod. The Panda backend is required — it automates your Panda Breath chamber heater using real-time Home Assistant data. If your printer is an Elegoo Centauri Carbon 2, also run the CC2 backend to feed its sensor data into the automation.
+This guide covers Docker setup for the Panda Breath mod. The Panda backend automates your Panda Breath chamber heater using real-time Home Assistant data. If your printer is an Elegoo Centauri Carbon 2, run the CC2 backend to feed its sensor data into the automation.
 
 ## Prerequisites
 
@@ -16,13 +16,19 @@ This guide covers Docker setup for the Panda Breath mod. The Panda backend is re
 git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
 cd BIQU-Panda-Breath-Mod
 
-cp .env.example .env
-nano .env        # fill in all Panda + HA credentials (see .env.example for all fields)
+# Optional for local runs: copy .env.example to .env and fill device credentials.
+# Portainer/Git stacks can set required values as stack environment variables.
 
-docker compose up -d
+docker compose --profile panda up -d
 ```
 
-All configuration is read from `.env` at container startup. TLS certificates are generated automatically on first run and persisted in a Docker volume — no manual cert generation needed.
+Compose provides stable defaults for internal stack addresses: `HA_MQTT_BROKER=mosquitto`, `HA_BASE_URL=http://homeassistant:8123`, and `HA_MQTT_PORT=1883`. Override them only if Home Assistant or Mosquitto are outside this stack. TLS certificates are generated automatically on first run and persisted in a Docker volume — no manual cert generation needed.
+
+For the full Panda Breath + CC2 setup, use both profiles:
+
+```bash
+docker compose --profile panda --profile cc2 up -d
+```
 
 ## Using an Elegoo Centauri Carbon 2?
 
@@ -31,10 +37,10 @@ If your printer is an Elegoo CC2, run the CC2 backend alongside the Panda backen
 > **LAN-only mode required** — on the CC2: **Settings → Network → LAN Only Mode → Enable**
 > Without this, the CC2's MQTT broker is not reachable.
 
-Add the CC2 vars to your `.env`, then:
+Provide `CC2_IP` and `CC2_SN` as stack environment variables or in `.env`, then:
 
 ```bash
-docker compose --profile cc2 up -d
+docker compose --profile cc2 up -d cc2_backend
 ```
 
 ---
@@ -47,54 +53,45 @@ See individual setup sections below for full configuration details.
 
 The Panda backend uses **Panda.py** to communicate with your BIQU Panda printer.
 
-### 1. Edit panda_config.json
+### 1. Configure runtime environment
 
-Replace placeholder values in `panda_config.json`:
+Docker generates `panda_config.json` inside the container from runtime environment variables. Do not edit `panda_config.json` for Docker deployments. For local Compose, put overrides in `.env`; for Portainer/Git stacks, set them in the stack environment.
 
-| Field | Description | Example |
-|-------|-------------|---------|
-| `PANDA_IP` | Printer IP (WebSocket at ws://{IP}/ws) | `<PANDA_IP>` |
-| `PRINTER_SN` | Panda printer serial number | `01P00A123456789` |
-| `ACCESS_CODE` | Printer access code (6-8 chars) | `01P00A12` |
-| `HA_BASE_URL` | Home Assistant URL | `http://<HA_IP>:8123` |
-| `HA_TOKEN` | Long-lived access token from HA | (generate in HA settings) |
-| `MQTT_BROKER` | HA MQTT broker IP | `<HA_IP>` |
-| `MQTT_USER` / `MQTT_PASS` | HA MQTT credentials | (from Mosquitto add-on) |
-| `MQTT_TOPIC_PREFIX` | Topic base prefix | `panda_breath_mod` |
-| `HOST_IP` | This PC's IP (register in Panda UI) | `192.168.x.xxx` |
+| Variable | Required? | Description | Default |
+|----------|-----------|-------------|---------|
+| `PANDA_IP` | yes | Panda device IP, WebSocket at `ws://{IP}/ws` | none |
+| `PANDA_SN` | yes | Panda/Bambu serial number used for binding | none |
+| `PANDA_ACCESS_CODE` | yes | Panda/Bambu access code | none |
+| `PANDA_HOST_IP` | usually no | Docker host LAN IP to register in Panda UI | auto-detected from `PANDA_IP` when possible |
+| `HA_BASE_URL` | no | Home Assistant URL | `http://homeassistant:8123` |
+| `HA_TOKEN` | yes | Long-lived access token from HA | none |
+| `HA_MQTT_BROKER` | no | MQTT service hostname or broker IP | `mosquitto` |
+| `HA_MQTT_PORT` | no | MQTT broker port | `1883` |
+| `HA_MQTT_USER` / `HA_MQTT_PASS` | if broker requires auth | HA MQTT credentials | empty |
+| `PANDA_MQTT_TOPIC_PREFIX` | no | Topic base prefix | `panda_breath_mod` |
 
-### 2. Generate TLS Certificates
-
-The Panda backend runs a TLS server on port 8883. Generate certificates:
-
-```bash
-mkdir -p certs
-cd certs
-
-# Generate private key
-openssl genrsa -out key.pem 2048
-
-# Generate self-signed certificate (valid 365 days)
-openssl req -new -x509 -key key.pem -out cert.pem -days 365 \
-  -subj "/C=US/ST=State/L=City/O=Org/CN=localhost"
-
-cd ..
-```
-
-### 3. Register in Panda UI
+### 2. Register in Panda UI
 
 1. Open Panda Touch UI
-2. Go to **Settings** → **Network** → **Access Code**
-3. In the IP field, enter `HOST_IP` from `panda_config.json`
-4. Connect — Panda will establish WebSocket to your host
+2. Use Klipper/direct binding; do not use scan
+3. Set `Printer IP` to `PANDA_HOST_IP`
+4. Connect — Panda will establish WebSocket to the Docker host on port 8883
 
-### 4. Verify Connection
+The serial number and access code are provided by the Docker backend from `.env` as `PANDA_SN` and `PANDA_ACCESS_CODE`. If a Bambu printer-type screen does not expose SN/access-code fields, use the Klipper/direct binding path and let the backend send those values.
+
+### 3. Verify Connection
 
 ```bash
-docker logs panda_backend
+docker compose logs -f panda_backend
 ```
 
-Look for: `Connected to Panda` or similar success messages.
+Look for the generated config message, the auto-detected `PANDA_HOST_IP` if you did not set it manually, and `[WS] Verbunden mit Panda`.
+
+### Panda Control GUI
+
+Docker Compose runs the headless backend only. The upstream **Panda Control GUI** is `PandaGui.py`, a PySide desktop app, and is not exposed as a web UI by Compose.
+
+For Docker deployments, use Home Assistant MQTT entities for control and monitoring. If you need the desktop GUI, run it separately on a machine with Python, PySide6, and access to the same MQTT broker.
 
 ---
 
@@ -107,20 +104,19 @@ The CC2 backend uses **cc2_connector.py** to communicate with your Elegoo Centau
 > On the printer: **Settings → Network → LAN Only Mode → Enable**
 > Without this, the MQTT port will not be reachable and the connector will fail to connect.
 
-### 1. Configure .env
+### 1. Configure runtime environment
 
-Set these values in `.env`:
+Only `CC2_IP` and `CC2_SN` normally need to be supplied. Other values have Compose defaults:
 
 ```env
 CC2_IP=<CC2_IP>
-CC2_USER=elegoo
-CC2_PASS=123456
 CC2_SN=<YOUR_SN>
-CC2_TOPIC_PREFIX=cc2
-HA_MQTT_BROKER=<HA_IP>
-HA_MQTT_PORT=1883
-HA_MQTT_USER=your_mqtt_username
-HA_MQTT_PASS=your_mqtt_password
+# Defaults:
+# CC2_USER=elegoo
+# CC2_PASS=123456
+# CC2_TOPIC_PREFIX=cc2
+# HA_MQTT_BROKER=mosquitto
+# HA_MQTT_PORT=1883
 ```
 
 **CC2 Requirements:**
@@ -142,7 +138,7 @@ If unreachable, check:
 ### 3. Start CC2 Backend
 
 ```bash
-docker compose --profile cc2 up -d
+docker compose --profile cc2 up -d cc2_backend
 ```
 
 ### 4. Verify Connection
@@ -220,9 +216,9 @@ docker compose down
 
 **Error:** `Connection refused` or `ws: unexpected close`
 
-- Verify Panda Touch registered in its UI with correct `HOST_IP`
+- Verify Panda Touch registered in its UI with correct `PANDA_HOST_IP`
 - Check firewall allows inbound port 8883
-- Verify TLS certificates in `./certs/` exist
+- Verify the `panda_certs` Docker volume exists and the container can copy `/app/certs/cert.pem` and `/app/certs/key.pem`
 
 ### HA autodiscovery doesn't create sensors
 
@@ -246,7 +242,7 @@ docker compose down
 **Error:** `SSL: CERTIFICATE_VERIFY_FAILED`
 
 - Panda Touch may not verify self-signed certs — this is normal
-- Verify `./certs/cert.pem` and `./certs/key.pem` exist and are readable by Docker
+- Verify the `panda_certs` Docker volume exists and the container can copy `/app/certs/cert.pem` and `/app/certs/key.pem`
 
 ---
 

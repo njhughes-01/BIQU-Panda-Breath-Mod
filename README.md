@@ -166,13 +166,25 @@ No Python environment setup required on the host.
 git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
 cd BIQU-Panda-Breath-Mod
 
-cp .env.example .env
-nano .env                       # fill in Panda + HA credentials
+# Optional for local runs: copy .env.example to .env and fill device credentials.
+# Portainer/Git stacks can set required values as stack environment variables.
 
-docker compose up -d
+docker compose --profile panda up -d
 ```
 
-All configuration is read from `.env`. TLS certificates are generated automatically on first run.
+Docker has stable defaults for internal service addresses: `HA_MQTT_BROKER=mosquitto` and `HA_BASE_URL=http://homeassistant:8123`. Override them only if Home Assistant or Mosquitto are outside this stack. TLS certificates are generated automatically on first run.
+
+Set the Panda/Bambu binding values as environment variables, either in Portainer or in a local `.env`:
+
+```env
+PANDA_IP=YOUR_PANDA_IP
+PANDA_SN=YOUR_PANDA_SERIAL
+PANDA_ACCESS_CODE=YOUR_ACCESS_CODE
+```
+
+When binding from the Panda UI, do not scan. Use Klipper/direct binding and set `Printer IP` to the Docker host IP (`PANDA_HOST_IP`, or the auto-detected value shown in the container logs). The backend sends `PANDA_SN` and `PANDA_ACCESS_CODE` to the Panda over WebSocket.
+
+The desktop **Panda Control GUI** (`PandaGui.py`) is not started by Docker Compose. Docker runs the headless backend; control and monitoring are through Home Assistant MQTT entities or a separate desktop run of `PandaGui.py`.
 
 ## Also have an Elegoo Centauri Carbon 2?
 
@@ -180,11 +192,13 @@ If your printer is an Elegoo Centauri Carbon 2, also run the CC2 backend to feed
 
 > **LAN-only mode required** — on the CC2: Settings → Network → LAN Only Mode → Enable
 
-Add the CC2 vars to `.env`, then:
+Provide `CC2_IP` and `CC2_SN` as stack environment variables or in `.env`, then:
 
 ```bash
-docker compose --profile cc2 up -d
+docker compose --profile cc2 up -d cc2_backend
 ```
+
+CC2 defaults are already set for `CC2_USER=elegoo`, `CC2_PASS=123456`, and `CC2_TOPIC_PREFIX=cc2`; normally only `CC2_IP` and `CC2_SN` need to be supplied.
 
 This publishes 7 sensors to Home Assistant via autodiscovery:
 
@@ -335,4 +349,3 @@ MIT License
 
 Use at your own risk.
 Always follow fire safety regulations when operating heated 3D printer enclosures.
-

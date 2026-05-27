@@ -2,10 +2,29 @@
 # Generate panda_config.json and TLS certs from environment variables before starting Panda.py
 if [ "$1" = "python3" ] && [ "$2" = "Panda.py" ]; then
 
-    # Auto-detect host LAN IP reachable by the Panda printer if not explicitly set
+    # Accept both Docker-specific names and the upstream panda_config.json names.
+    PANDA_HOST_IP="${PANDA_HOST_IP:-$HOST_IP}"
+    PANDA_SN="${PANDA_SN:-$PRINTER_SN}"
+    PANDA_ACCESS_CODE="${PANDA_ACCESS_CODE:-$ACCESS_CODE}"
+    PANDA_MQTT_TOPIC_PREFIX="${PANDA_MQTT_TOPIC_PREFIX:-$MQTT_TOPIC_PREFIX}"
+    export PANDA_HOST_IP PANDA_SN PANDA_ACCESS_CODE PANDA_MQTT_TOPIC_PREFIX
+
+    # Auto-detect host LAN IP reachable by the Panda printer if not explicitly set.
     if [ -z "$PANDA_HOST_IP" ] && [ -n "$PANDA_IP" ]; then
         PANDA_HOST_IP=$(ip route get "$PANDA_IP" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") print $(i+1)}')
         echo "Auto-detected PANDA_HOST_IP=$PANDA_HOST_IP"
+    fi
+
+    missing=""
+    for var in PANDA_IP PANDA_SN PANDA_ACCESS_CODE HA_TOKEN; do
+        eval "value=\${$var}"
+        if [ -z "$value" ]; then
+            missing="$missing $var"
+        fi
+    done
+    if [ -n "$missing" ]; then
+        echo "Missing required Panda environment variables:$missing" >&2
+        exit 1
     fi
 
     # Generate TLS certs on first run if not already present
