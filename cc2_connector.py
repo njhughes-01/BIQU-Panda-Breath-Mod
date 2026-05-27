@@ -100,7 +100,6 @@ _SPEED_MODE_NAMES: Dict[int, str] = {
 _file_list: List[str] = []
 # Last published filament type — prevents re-publishing on every publish_to_ha tick
 _last_filament_type: str = ""
-_canvas_retry_active: bool = False  # prevents spawning multiple concurrent retry threads
 
 
 def generate_client_id() -> str:
@@ -145,18 +144,6 @@ def request_canvas_info() -> None:
     send_cc2_command(2005)
 
 
-def _retry_canvas_for_active_tray(attempts: int = 5, interval: float = 3.0) -> None:
-    """Background retry loop: re-request canvas info until active_tray_id >= 0."""
-    global _canvas_retry_active
-    try:
-        for _ in range(attempts):
-            time.sleep(interval)
-            if _canvas_info.get("active_tray_id", -1) >= 0:
-                return  # already resolved
-            logger.info("active_tray_id still -1, retrying canvas info request")
-            request_canvas_info()
-    finally:
-        _canvas_retry_active = False
 
 
 def request_file_list() -> None:
@@ -173,11 +160,13 @@ def publish_active_filament(tray_id: int) -> None:
     if 0 <= tray_id < len(trays):
         filament_type = trays[tray_id].get("filament_type", "")
     if not filament_type:
-        # Fallback: if exactly one tray has a non-empty filament loaded, use it
-        loaded = [t for t in trays if t.get("filament_type") and t.get("status", 0) == 1]
-        if len(loaded) == 1:
-            filament_type = loaded[0].get("filament_type", "")
-            logger.info(f"active_tray_id unavailable, single loaded tray fallback: {filament_type}")
+        # Fallback: use the first tray with a non-empty filament_type (CC2 often has active_tray_id=-1)
+        for t in trays:
+            ft = t.get("filament_type", "")
+            if ft:
+                filament_type = ft
+                logger.info(f"active_tray_id unavailable, using first tray with filament: {filament_type}")
+                break
     if filament_type and filament_type != _last_filament_type:
         _last_filament_type = filament_type
         ha_client.publish(f"{CC2_TOPIC_PREFIX}/active_filament_type", filament_type, qos=1, retain=True)
@@ -609,17 +598,7 @@ def cc2_on_message(client: Client, userdata: Any, msg: Any) -> None:
                     canvas = result.get("canvas_info", {})
                     _canvas_info.update(canvas)
                     active_tray = canvas.get("active_tray_id", -1)
-                    if active_tray >= 0:
-                        publish_active_filament(active_tray)
-                    else:
-                        # CC2 hasn't set active_tray_id yet; retry in background (one thread at a time)
-                        global _canvas_retry_active
-                        if not _canvas_retry_active:
-                            _canvas_retry_active = True
-                            threading.Thread(
-                                target=_retry_canvas_for_active_tray,
-                                daemon=True
-                            ).start()
+                    publish_active_filament(active_tray)
                     logger.info(f"Canvas info updated, active_tray_id={active_tray}")
                 return
 
