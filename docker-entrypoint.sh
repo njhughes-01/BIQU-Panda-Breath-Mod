@@ -1,7 +1,14 @@
 #!/bin/sh
 # Generate panda_config.json from environment variables before starting Panda.py
 if [ "$1" = "python3" ] && [ "$2" = "Panda.py" ]; then
-    python3 - <<'PYEOF'
+
+    # Auto-detect host LAN IP reachable by the Panda printer if not explicitly set
+    if [ -z "$PANDA_HOST_IP" ] && [ -n "$PANDA_IP" ]; then
+        PANDA_HOST_IP=$(ip route get "$PANDA_IP" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") print $(i+1)}')
+        echo "Auto-detected PANDA_HOST_IP=$PANDA_HOST_IP"
+    fi
+
+    python3 - <<PYEOF
 import json, os
 
 config = {
