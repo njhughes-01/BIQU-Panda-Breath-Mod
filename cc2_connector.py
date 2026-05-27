@@ -81,17 +81,34 @@ def publish_to_ha() -> None:
         logger.warning("HA MQTT client not connected, skipping publish")
         return
 
-    with printer_state_lock:
-        state = printer_state.copy()
-
     try:
-        nozzle_temp = (state.get("extruder") or {}).get("temperature", 0)
-        nozzle_target = (state.get("extruder") or {}).get("target", 0)
-        bed_temp = (state.get("heater_bed") or {}).get("temperature", 0)
-        bed_target = (state.get("heater_bed") or {}).get("target", 0)
-        chamber_temp = (state.get("ztemperature_sensor") or {}).get("temperature", 0)
-        print_status = (state.get("print_stats") or {}).get("state", "idle")
-        print_progress = (state.get("print_stats") or {}).get("progress", 0)
+        with printer_state_lock:
+            extruder = printer_state.get("extruder") or {}
+            nozzle_temp = extruder.get("temperature")
+            if nozzle_temp is None:
+                nozzle_temp = 0
+            nozzle_target = extruder.get("target")
+            if nozzle_target is None:
+                nozzle_target = 0
+
+            heater_bed = printer_state.get("heater_bed") or {}
+            bed_temp = heater_bed.get("temperature")
+            if bed_temp is None:
+                bed_temp = 0
+            bed_target = heater_bed.get("target")
+            if bed_target is None:
+                bed_target = 0
+
+            ztemp = printer_state.get("ztemperature_sensor") or {}
+            chamber_temp = ztemp.get("temperature")
+            if chamber_temp is None:
+                chamber_temp = 0
+
+            print_stats = printer_state.get("print_stats") or {}
+            print_status = print_stats.get("state") or "idle"
+            print_progress = print_stats.get("progress")
+            if print_progress is None:
+                print_progress = 0
 
         # Convert progress to percentage (0-100)
         if isinstance(print_progress, (int, float)) and 0 <= float(print_progress) <= 1:
@@ -233,6 +250,9 @@ def cc2_on_message(client: Client, userdata: Any, msg: Any) -> None:
     try:
         payload = json.loads(msg.payload.decode())
         logger.debug(f"CC2 message on {msg.topic}: {payload}")
+        if not isinstance(payload, dict):
+            logger.warning(f"Unexpected non-dictionary payload received on {msg.topic}")
+            return
 
         # Handle registration response
         if "register_response" in msg.topic:
@@ -252,11 +272,14 @@ def cc2_on_message(client: Client, userdata: Any, msg: Any) -> None:
                 result = payload["result"]
                 if isinstance(result, dict):
                     status_data = result.get("status") or result
+            elif "status" in payload:
+                # Direct status notification from api_status topic
+                status_data = payload["status"]
             elif "params" in payload:
                 # Unsolicited Klipper-style notification: params[0] is the status dict
                 params = payload["params"]
                 if isinstance(params, list) and params:
-                    status_data = params[0]
+                    status_data = params[0].get("status", params[0])
             if status_data and isinstance(status_data, dict):
                 with printer_state_lock:
                     deep_merge(printer_state, status_data)
@@ -347,10 +370,10 @@ def main() -> None:
 
         try:
             logger.info(f"Connecting to HA MQTT broker at {HA_MQTT_BROKER}:{HA_MQTT_PORT}")
-            ha_client.connect(HA_MQTT_BROKER, HA_MQTT_PORT, keepalive=60)
+            ha_client.connect_async(HA_MQTT_BROKER, HA_MQTT_PORT, keepalive=60)
             ha_client.loop_start()
         except Exception as e:
-            logger.error(f"Failed to connect to HA MQTT broker: {e}")
+            logger.error(f"Failed to initialize HA MQTT client: {e}")
             ha_client = None
     else:
         logger.warning("HA_MQTT_BROKER not set, skipping HA integration")
