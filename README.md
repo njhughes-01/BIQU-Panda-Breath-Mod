@@ -166,13 +166,13 @@ No Python environment setup required on the host.
 git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
 cd BIQU-Panda-Breath-Mod
 
-# Optional for local runs: copy .env.example to .env and fill device credentials.
-# Portainer/Git stacks can set required values as stack environment variables.
+cp .env.example .env
+nano .env                       # fill device credentials and any external service addresses
 
-docker compose --profile panda up -d
+docker compose up -d
 ```
 
-Docker has stable defaults for internal service addresses: `HA_MQTT_BROKER=mosquitto` and `HA_BASE_URL=http://homeassistant:8123`. Override them only if Home Assistant or Mosquitto are outside this stack. TLS certificates are generated automatically on first run.
+Docker has stable defaults for internal service addresses: `HA_MQTT_BROKER=mosquitto` and `HA_BASE_URL=http://homeassistant:8123`. Override them in `.env` or Portainer stack environment variables if Home Assistant or Mosquitto are outside this stack. TLS certificates are generated automatically on first run.
 
 Set the Panda/Bambu binding values as environment variables, either in Portainer or in a local `.env`:
 
@@ -192,10 +192,10 @@ If your printer is an Elegoo Centauri Carbon 2, also run the CC2 backend to feed
 
 > **LAN-only mode required** — on the CC2: Settings → Network → LAN Only Mode → Enable
 
-Provide `CC2_IP` and `CC2_SN` as stack environment variables or in `.env`, then:
+Provide `CC2_IP` and `CC2_SN` as stack environment variables or in `.env`, then start the stack:
 
 ```bash
-docker compose --profile cc2 up -d cc2_backend
+docker compose up -d
 ```
 
 CC2 defaults are already set for `CC2_USER=elegoo`, `CC2_PASS=123456`, and `CC2_TOPIC_PREFIX=cc2`; normally only `CC2_IP` and `CC2_SN` need to be supplied.

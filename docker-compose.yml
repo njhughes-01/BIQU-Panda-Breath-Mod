@@ -22,8 +22,6 @@ services:
       PANDA_ACCESS_CODE: ${PANDA_ACCESS_CODE:-}
       PANDA_HOST_IP: ${PANDA_HOST_IP:-}
       PANDA_MQTT_TOPIC_PREFIX: ${PANDA_MQTT_TOPIC_PREFIX:-panda_breath_mod}
-    profiles:
-      - panda
     volumes:
       - panda_certs:/app/certs
     logging:
@@ -51,8 +49,6 @@ services:
       HA_MQTT_PORT: ${HA_MQTT_PORT:-1883}
       HA_MQTT_USER: ${HA_MQTT_USER:-}
       HA_MQTT_PASS: ${HA_MQTT_PASS:-}
-    profiles:
-      - cc2
     logging:
       driver: json-file
       options:

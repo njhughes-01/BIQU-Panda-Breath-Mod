@@ -16,19 +16,13 @@ This guide covers Docker setup for the Panda Breath mod. The Panda backend autom
 git clone https://github.com/njhughes-01/BIQU-Panda-Breath-Mod.git
 cd BIQU-Panda-Breath-Mod
 
-# Optional for local runs: copy .env.example to .env and fill device credentials.
-# Portainer/Git stacks can set required values as stack environment variables.
+cp .env.example .env
+nano .env        # fill device credentials and any external service addresses
 
-docker compose --profile panda up -d
+docker compose up -d
 ```
 
-Compose provides stable defaults for internal stack addresses: `HA_MQTT_BROKER=mosquitto`, `HA_BASE_URL=http://homeassistant:8123`, and `HA_MQTT_PORT=1883`. Override them only if Home Assistant or Mosquitto are outside this stack. TLS certificates are generated automatically on first run and persisted in a Docker volume — no manual cert generation needed.
-
-For the full Panda Breath + CC2 setup, use both profiles:
-
-```bash
-docker compose --profile panda --profile cc2 up -d
-```
+Compose provides stable defaults for internal stack addresses: `HA_MQTT_BROKER=mosquitto`, `HA_BASE_URL=http://homeassistant:8123`, and `HA_MQTT_PORT=1883`. Override them in `.env` or Portainer stack environment variables if Home Assistant or Mosquitto are outside this stack. TLS certificates are generated automatically on first run and persisted in a Docker volume — no manual cert generation needed.
 
 ## Using an Elegoo Centauri Carbon 2?
 
@@ -37,10 +31,10 @@ If your printer is an Elegoo CC2, run the CC2 backend alongside the Panda backen
 > **LAN-only mode required** — on the CC2: **Settings → Network → LAN Only Mode → Enable**
 > Without this, the CC2's MQTT broker is not reachable.
 
-Provide `CC2_IP` and `CC2_SN` as stack environment variables or in `.env`, then:
+Provide `CC2_IP` and `CC2_SN` as stack environment variables or in `.env`, then start the stack:
 
 ```bash
-docker compose --profile cc2 up -d cc2_backend
+docker compose up -d
 ```
 
 ---
@@ -138,7 +132,7 @@ If unreachable, check:
 ### 3. Start CC2 Backend
 
 ```bash
-docker compose --profile cc2 up -d cc2_backend
+docker compose up -d
 ```
 
 ### 4. Verify Connection
@@ -184,7 +178,7 @@ In Home Assistant:
 Start both Panda and CC2 backends together:
 
 ```bash
-docker compose --profile panda --profile cc2 up -d
+docker compose up -d
 ```
 
 View logs:
@@ -226,7 +220,7 @@ docker compose down
 
 - Verify `HA_MQTT_BROKER` and credentials in `.env`
 - Check HA Mosquitto add-on is running: **Settings** → **Add-ons** → **Mosquitto broker**
-- Restart CC2 backend: `docker compose --profile cc2 restart cc2_backend`
+- Restart CC2 backend: `docker compose restart cc2_backend`
 - Check Home Assistant MQTT integration is enabled: **Settings** → **Devices & Services** → **MQTT** → **Configure**
 
 ### No data arriving at HA
