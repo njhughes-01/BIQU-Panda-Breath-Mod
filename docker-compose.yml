@@ -7,7 +7,8 @@ services:
         - linux/arm64
     command: python3 Panda.py
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "8883:8883"
     env_file:
       - .env
     volumes:
