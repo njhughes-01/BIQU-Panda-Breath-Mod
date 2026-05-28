@@ -1125,13 +1125,15 @@ async def update_limits_from_ws():
 
                         # Auto-resume CC2 if we paused it waiting for chamber to heat.
                         # Use min(Panda Breath, CC2 sensor) — but only trust CC2 reading
-                        # if > 5°C (guards against stale retained 0 from cc2_backend startup).
+                        # Resume uses the Panda Breath sensor — it's the controlling sensor
+                        # for the heater and physically near the heating element. The CC2's
+                        # own chamber sensor is in a different location and reads ~10°C cooler
+                        # due to heat gradient; using min() would prevent resume at target.
                         if cc2_paused_for_preheat:
                             _target = float(current_data.get("chamber_setpoint", 0))
                             _pb_ist = float(current_data.get("chamber_temp", 0))
                             _cc2_ist_raw = float(current_data.get("cc2_chamber_temp", 0.0))
-                            _ist = min(_pb_ist, _cc2_ist_raw) if _cc2_ist_raw > 5.0 else _pb_ist
-                            if _target > 0 and _ist >= (_target - float(HYSTERESE)):
+                            if _target > 0 and _pb_ist >= (_target - float(HYSTERESE)):
                                 log_event(f"[CC2-SLICER] Chamber at PB:{_pb_ist:.0f}°C CC2:{_cc2_ist_raw:.0f}°C — resuming CC2 print", force_console=True)
                                 cc2_paused_for_preheat = False
                                 if current_data.get("cc2_print_status") == "paused":
@@ -1530,16 +1532,20 @@ async def update_limits_from_ws():
 async def bind_watchdog():
     global bind_confirmed, bind_warning_shown
 
-    await asyncio.sleep(10)
+    # In CC2 mode the device auto-binds from credentials — no Panda Touch UI exists.
+    # Give it more time since slow WiFi can delay the first settings response.
+    await asyncio.sleep(30 if CC2_IP else 10)
 
     if not bind_confirmed and not bind_warning_shown:
-        log_event("⚠️ Please press Bind in the Panda UI!", force_console=True)
-
-        mqtt_client.publish(
-            f"{MQTT_TOPIC_PREFIX}/status",
-            "Please press Bind in the Panda UI",
-            retain=True
-        )
+        if CC2_IP:
+            log_event("[WS] Waiting for Panda Breath bind (auto-bind via credentials)...", force_console=True)
+        else:
+            log_event("⚠️ Please press Bind in the Panda UI!", force_console=True)
+            mqtt_client.publish(
+                f"{MQTT_TOPIC_PREFIX}/status",
+                "Please press Bind in the Panda UI",
+                retain=True
+            )
 
         bind_warning_shown = True
         
