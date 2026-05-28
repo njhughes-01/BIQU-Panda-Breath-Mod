@@ -819,8 +819,8 @@ def setup_mqtt_discovery(client):
         "state_topic": f"{base}/status", "device": dev, "icon": "mdi:fire-circle"
     }), retain=True)
 
-    client.publish(f"homeassistant/sensor/{base}_slicer_target/config", json.dumps({
-        "name": "Slicer Target Temp", "unique_id": f"{sn}_slicer_target", "object_id": "panda_slicer_target",
+    client.publish(f"homeassistant/sensor/{base}_slicer_target_temp/config", json.dumps({
+        "name": "Slicer Target Temp", "unique_id": f"{sn}_slicer_target_temp", "object_id": "panda_slicer_target_temp",
         "state_topic": f"{base}/slicer_target_temp", "unit_of_measurement": "°C",
         "device_class": "temperature", "device": dev
     }), retain=True)
