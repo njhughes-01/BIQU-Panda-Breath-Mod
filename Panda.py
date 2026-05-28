@@ -1284,15 +1284,15 @@ async def update_limits_from_ws():
                         work_on_live = s.get("work_on")
                         panda_running = s.get("isrunning") in (1, True, "1")
 
+                        _cc2_printing = CC2_IP and current_data.get("cc2_print_status", "idle") in {
+                            "printing", "preheating", "paused", "pausing", "resuming", "stopping"
+                        }
+
                         if global_lock:
                             target_state, info = RELAY_OFF, "LOCKED"
 
                         elif power_forced_off or work_mode_live not in (1, 2, 3):
                             target_state, info = RELAY_OFF, "Standby"
-
-                        _cc2_printing = CC2_IP and current_data.get("cc2_print_status", "idle") in {
-                            "printing", "preheating", "paused", "pausing", "resuming", "stopping"
-                        }
 
                         elif work_mode_live == 3:
                             if ist < (target - HYSTERESE):
@@ -1586,12 +1586,12 @@ async def handle_panda(reader, writer):
                     global_heating_state = RELAY_OFF
 
                 else:
-                    if power_forced_off or work_mode not in (1, 2, 3):
-                        target_state, info = RELAY_OFF, "Standby"
-
                     _cc2_printing = CC2_IP and current_data.get("cc2_print_status", "idle") in {
                         "printing", "preheating", "paused", "pausing", "resuming", "stopping"
                     }
+
+                    if power_forced_off or work_mode not in (1, 2, 3):
+                        target_state, info = RELAY_OFF, "Standby"
 
                     elif work_mode == 3:
                         target = float(last_ws_settings.get("custom_temp", current_data.get("filament_temp", target)))
