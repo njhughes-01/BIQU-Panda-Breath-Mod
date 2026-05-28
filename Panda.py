@@ -1712,16 +1712,21 @@ async def main():
     asyncio.create_task(update_limits_from_ws())
     if not CC2_IP:
         asyncio.create_task(slicer_auto_parser())
-    ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-    ssl_ctx.load_cert_chain(certfile=str(BASE_DIR / "cert.pem"), keyfile=str(BASE_DIR / "key.pem"))
-    
-    # ✅ OPTIMIERUNG: SECLEVEL=0 für Panda Touch Kompatibilität (Legacy TLS)
-    ssl_ctx.set_ciphers('DEFAULT@SECLEVEL=0:ALL')
-    
-    server = await asyncio.start_server(handle_panda, '0.0.0.0', 8883, ssl=ssl_ctx)
-    log_event(f"[SERVER] TLS server started on 8883 (SECLEVEL=0)")
+
     print(f"\n🚀 Panda-Logic-Sync {PANDA_VERSION}\n")
-    async with server: await server.serve_forever()
+
+    if CC2_IP:
+        # CC2 mode: no Panda Touch in the loop — TLS emulation server not needed.
+        # WS loop (update_limits_from_ws) and MQTT thread handle everything.
+        log_event("[SERVER] CC2 mode — TLS server disabled (no Panda Touch)", force_console=True)
+        await asyncio.Event().wait()
+    else:
+        ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ssl_ctx.load_cert_chain(certfile=str(BASE_DIR / "cert.pem"), keyfile=str(BASE_DIR / "key.pem"))
+        ssl_ctx.set_ciphers('DEFAULT@SECLEVEL=0:ALL')
+        server = await asyncio.start_server(handle_panda, '0.0.0.0', 8883, ssl=ssl_ctx)
+        log_event(f"[SERVER] TLS server started on 8883 (SECLEVEL=0)")
+        async with server: await server.serve_forever()
 
 if __name__ == "__main__":
     try: asyncio.run(main())

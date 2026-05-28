@@ -639,6 +639,9 @@ def cc2_on_connect(client: Client, userdata: Any, connect_flags: Any, rc: int, p
         })
         client.publish(f"elegoo/{CC2_SN}/api_register", reg_payload, qos=1)
         logger.info("Sent registration to CC2")
+        if ha_client and ha_client.is_connected():
+            ha_client.publish(f"{CC2_TOPIC_PREFIX}/status", "online", qos=1, retain=True)
+            logger.info("Re-published CC2 online status to HA")
     else:
         logger.error(f"CC2 connection failed with code {rc}")
 
@@ -743,7 +746,14 @@ def cc2_on_message(client: Client, userdata: Any, msg: Any) -> None:
 
 def cc2_on_disconnect(client: Client, userdata: Any, disconnect_flags: Any, rc: int, properties: Any = None) -> None:
     """CC2 MQTT disconnection callback."""
+    global _last_filament_type
     logger.warning(f"CC2 MQTT disconnected — rc={rc} (0=clean, non-zero=unexpected)")
+    with _cc2_state_lock:
+        _canvas_info.clear()
+        _last_filament_type = ""
+    if ha_client and ha_client.is_connected():
+        ha_client.publish(f"{CC2_TOPIC_PREFIX}/status", "offline", qos=1, retain=True)
+        logger.info("Marked CC2 unavailable in HA (printer MQTT disconnected)")
 
 
 def ha_on_message(client: Client, userdata: Any, msg: Any) -> None:
