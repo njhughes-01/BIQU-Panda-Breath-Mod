@@ -3,19 +3,53 @@
 All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [2.0.3] - 2026-05-28
+
+### Added
+- **Backend mode indicator** — `Panda.py` publishes `{prefix}/backend_mode` = `"CC2"` or `"Klipper"`
+  as a retained MQTT topic on every connect; web GUI header displays a blue `CC2 Mode` or green
+  `Klipper Mode` badge so the active path is always visible
+- **State-transition logging** (always-on, not behind `DEBUG`): `[HEAT-ON]`, `[HEAT-OFF]`, `[IDLE]`,
+  `[AT-TEMP]` on every status change; periodic `[STATUS]` every 60s while state is stable
+- **Bind confirmation log** `[WS] Bind confirmed` emitted for both CC2 and Klipper paths
+- **Power-off completion log** `[POWER-OFF] Heater shutdown complete`; warns if Panda not connected
 
 ### Changed
-- **German variable names removed** — `kammer_soll` → `chamber_setpoint`, `kammer_ist` → `chamber_temp`,
-  `bett_limit` → `bed_limit` throughout `Panda.py`; HA discovery `unique_id` for the chamber-temp
-  sensor (`{PRINTER_SN}_kammer_ist`) intentionally unchanged to avoid orphaning the existing HA entity
-- **Relay sentinel constants** — `RELAY_ON = 85.0` / `RELAY_OFF = 20.0` replace all `> 50` / `== 20.0`
-  / `== 85.0` magic number comparisons in heating logic for clarity
-- **`bed_target_temper` uses actual setpoint** — was hardcoded `100.0` when heating; now sends
-  `float(int(chamber_setpoint))` so the Panda Touch display shows the real target temperature
-- **HA entity `object_id` added** to every MQTT autodiscovery config so entity IDs in HA are clean
-  English names (`panda_chamber_target`, `panda_chamber_temp`, `panda_heating_active`, etc.) instead
-  of auto-generated slugs
+- **`heizung` MQTT topic → `heating`**; `heizung_stop/set` → `heat_stop/set` — HA dashboard YAML and
+  `panda_web.py` tile definitions updated to match
+- **German runtime strings fully removed**: local variable `kammer` → `chamber_target`; log strings
+  `"Neue Datei erkannt"` → `"New file detected"`, `"MANUELL MODE"` → `"MANUAL MODE"`,
+  `"System ist LOCKED! Befehl ignoriert"` → `"System is LOCKED! Command ignored"`; German variable
+  names `kammer_soll` → `chamber_setpoint`, `kammer_ist` → `chamber_temp`, `bett_limit` → `bed_limit`
+- **Status strings**: `"Hysterese"` replaced — shows `"Idle"` when CC2 has no active print or
+  target=0; shows `"At Temperature"` when holding within hysteresis band
+- **HA MQTT autodiscovery fully rebuilt** — all entities use clean `unique_id` (`{PRINTER_SN}_{slug}`),
+  `object_id` with `panda_` prefix, English names; `panda_slicer_target_temp` corrected
+  (was `panda_slicer_target`); existing entities must be re-added to dashboards after upgrade
+- **CC2 mode: TLS emulation server not started** — no Panda Touch in the CC2 path; port 8883 stays
+  closed; `cert.pem` / `key.pem` not required when `CC2_IP` is set
+- **Relay magic numbers replaced** — `RELAY_ON = 85.0` / `RELAY_OFF = 20.0` constants replace all
+  `> 50` / `== 20.0` / `== 85.0` comparisons throughout heating logic
+
+### Fixed
+- **`bed_target_temper` hardcoded `100.0`** — now sends actual `chamber_setpoint` so the Panda
+  Touch display shows the real target while heating
+- **Heat tile lag (~10s)** — backend now polls `get_settings` 0.3s after every heat command; Heat
+  tile in HA and web GUI flips to ON within ~0.5s instead of the next device heartbeat
+- **`global_heating_state` not reset on WS disconnect** — retained `RELAY_ON` across reconnects;
+  now resets to `RELAY_OFF` and publishes `heating=OFF` on disconnect so HA doesn't show Heat=ON
+  while the device is offline
+- **`panda_web` stale topics on MQTT disconnect** — `state["topics"]` now cleared on disconnect so
+  the web GUI shows `--` for all tiles instead of the last known values during broker outage
+- **CC2 MQTT disconnect not reflected in HA** — `cc2_on_disconnect` now publishes
+  `{CC2_TOPIC_PREFIX}/status=offline` so all CC2 HA entities go unavailable when the printer
+  reboots or loses network; reconnect republishes `status=online` without needing an HA MQTT reconnect
+- **`_canvas_info` / `_last_filament_type` not cleared on CC2 disconnect** — stale tray data
+  could cause wrong filament type to fire on the next print start; now cleared on disconnect
+- **MQTT keepalive=60** on all MQTT clients; TCP `SO_KEEPALIVE` (idle=10s) on backend client
+- **Chamber setpoint max** raised from 80°C to 85°C to match relay hardware limit (`RELAY_ON`)
+- **Fan speed raw=1 edge case** fixed (was mapped incorrectly)
+- Three HA MQTT autodiscovery validation errors resolved
 
 ## [2.0.2] - 2026-05-28
 
