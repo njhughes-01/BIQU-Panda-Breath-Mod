@@ -291,6 +291,9 @@ def on_mqtt_message(client, userdata, msg):
                     # Clear retained active_filament_type so next print doesn't preheat-pause immediately
                     mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/active_filament_type", "", retain=True)
                     current_data["cc2_pending_filament"] = ""
+                    current_data["slicer_soll"] = 0.0
+                    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_soll", 0, retain=True)
+                    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_target_temp", 0, retain=True)
                     log_event(f"[CC2-SLICER] Print ended ({prev_status}→{new_status}), turning off chamber heater", force_console=True)
                     if cc2_paused_for_preheat:
                         cc2_paused_for_preheat = False
@@ -335,10 +338,15 @@ def on_mqtt_message(client, userdata, msg):
                                 cc2_paused_for_preheat = True
                         asyncio.run_coroutine_threadsafe(_cc2_heat_on_start(), main_loop)
                         log_event(f"[CC2-SLICER] Print started, re-arming chamber heat to {kammer:.0f}°C", force_console=True)
+            elif cc2_key == "filename":
+                mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/cc2_filename", val, retain=True)
+                if val:
+                    current_data["last_analyzed_file"] = val
+                    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_file", val, retain=True)
             elif cc2_key in (
                 "nozzle_temp", "print_progress",
                 "filament_detected", "remaining_time", "current_layer",
-                "filename", "z_height", "fan_speed", "box_fan_speed",
+                "z_height", "fan_speed", "box_fan_speed", "chamber_temp",
                 "led", "has_error", "speed_mode", "file_count", "latest_filename",
             ):
                 mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/cc2_{cc2_key}", val, retain=True)
@@ -361,7 +369,10 @@ def on_mqtt_message(client, userdata, msg):
                     log_event(f"[CC2-SLICER] Unknown filament type {val!r}, no chamber target", force_console=True)
                     return
                 current_data["kammer_soll"] = float(target)
+                current_data["slicer_soll"] = float(target)
                 mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(target), retain=True)
+                mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_soll", int(target), retain=True)
+                mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_target_temp", int(target), retain=True)
                 log_event(f"[CC2-SLICER] {val} → chamber {target}°C", force_console=True)
                 if (panda_ws or panda_writer) and int(target) > 0:
                     chamber_now = safe_float(current_data.get("kammer_ist", 0), 0)
@@ -391,7 +402,10 @@ def on_mqtt_message(client, userdata, msg):
                     asyncio.run_coroutine_threadsafe(_cc2_heat(), main_loop)
                 elif int(target) == 0:
                     current_data["kammer_soll"] = 0.0
+                    current_data["slicer_soll"] = 0.0
                     mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", 0, retain=True)
+                    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_soll", 0, retain=True)
+                    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_target_temp", 0, retain=True)
                     async def _cc2_off_no_heat():
                         try:
                             await panda_send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "set_temp": 0}}))
