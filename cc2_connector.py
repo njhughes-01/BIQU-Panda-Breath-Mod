@@ -929,9 +929,8 @@ def main() -> None:
 
         try:
             logger.info(f"Connecting to HA MQTT broker at {HA_MQTT_BROKER}:{HA_MQTT_PORT}")
-            ha_client.connect_async(HA_MQTT_BROKER, HA_MQTT_PORT, keepalive=60)
-            ha_thread = threading.Thread(target=ha_client.loop_forever, daemon=True, name="ha-mqtt-loop")
-            ha_thread.start()
+            ha_client.connect_async(HA_MQTT_BROKER, HA_MQTT_PORT, keepalive=30)
+            ha_client.loop_start()  # paho-managed thread; more reliable PINGREQ than manual thread
         except Exception as e:
             logger.error(f"Failed to initialize HA MQTT client: {e}")
             ha_client = None
