@@ -881,7 +881,7 @@ def setup_mqtt():
     client.on_message = on_mqtt_message
     client.on_connect = _on_mqtt_connect
     client.reconnect_delay_set(min_delay=2, max_delay=30)
-    client.connect_async(MQTT_BROKER, MQTT_PORT, keepalive=30)
+    client.connect_async(MQTT_BROKER, MQTT_PORT, keepalive=120)
     mqtt_thread = threading.Thread(target=client.loop_forever, daemon=True, name="panda-mqtt-loop")
     mqtt_thread.start()
     return client
@@ -1390,6 +1390,9 @@ async def update_limits_from_ws():
 
             panda_ws = None
             bind_confirmed = False  # Force work_mode=2 re-sync on next connect
+            # Publish status while WS is down so HA MQTT keepalive timer resets every 5s
+            # (without this, no data flows to HA during reconnect → keepalive timeout at 60s)
+            mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/status", "Panda Breath offline", retain=True)
             await asyncio.sleep(5)
 
 async def bind_watchdog():
