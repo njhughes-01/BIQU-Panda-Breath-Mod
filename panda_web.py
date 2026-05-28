@@ -30,7 +30,7 @@ COMMAND_TOPICS = {
     "auto": ("auto/set", "PRESS"),
     "manual": ("manual/set", "PRESS"),
     "dry": ("drying/set", "PRESS"),
-    "stop": ("heizung_stop/set", "PRESS"),
+    "stop": ("heat_stop/set", "PRESS"),
     "unlock": ("unlock/set", "PRESS"),
     "power_on": ("panda_power/set", "ON"),
     "power_off": ("panda_power/set", "OFF"),
@@ -229,7 +229,7 @@ INDEX_HTML = """<!doctype html>
   </main>
   <script>
     const tileDefs = [
-      ['status', 'Status'], ['bed', 'Bed'], ['ist', 'Chamber'], ['heizung', 'Heat'],
+      ['status', 'Status'], ['bed', 'Bed'], ['ist', 'Chamber'], ['heating', 'Heat'],
       ['fan', 'Fan'], ['panda_modus', 'Mode'], ['panda_power', 'Panda Power'], ['lock_status', 'Lock'],
       ['version', 'Version'], ['slicer_target_temp', 'Slicer Target'],
       ['cc2_nozzle_temp', 'CC2 Nozzle'], ['cc2_print_status', 'CC2 Print'], ['cc2_print_progress', 'CC2 Progress'],

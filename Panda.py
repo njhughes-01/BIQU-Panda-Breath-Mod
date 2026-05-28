@@ -28,6 +28,8 @@ last_switch_time = 0
 last_stop_command_time = 0
 last_live_log_state = None
 last_live_log_time = 0
+_last_heat_status = ""
+_last_heat_log_time = 0.0
 bed_sensor_error = False
 bind_confirmed = False
 bind_warning_shown = False
@@ -60,7 +62,7 @@ MQTT_PASS = CONFIG["MQTT_PASS"]
 
 # MQTT Präfix: Die Basis für alle Topics (z.B. panda_breath_mod/soll).
 # ⚠️ WICHTIG: Deine Screenshots zeigen entity_ids wie:
-# - button.panda_breath_mod_heizung_stop
+# - button.panda_heat_stop
 # - switch.panda_breath_mod_slicer_priority_mode
 # - sensor.panda_breath_mod_slicer_target_temp
 # Darum MUSS der Prefix "panda_breath_mod" sein, sonst passt HA/YAML nicht.
@@ -529,7 +531,7 @@ def on_mqtt_message(client, userdata, msg):
     # ============================================================
     # ✅ HEIZUNG STOP (NOT-AUS MIT LOCK) - VERBESSERT
     # ------------------------------------------------------------
-    if msg.topic == f"{MQTT_TOPIC_PREFIX}/heizung_stop/set":
+    if msg.topic == f"{MQTT_TOPIC_PREFIX}/heat_stop/set":
         log_event(">>> !!! EMERGENCY STOP & LOCK !!! <<<", force_console=True)
 
         global_lock = True
@@ -819,7 +821,7 @@ def setup_mqtt_discovery(client):
     }), retain=True)
 
     client.publish(f"homeassistant/binary_sensor/{base}_heizung/config", json.dumps({
-        "name": "Heating Active", "state_topic": f"{base}/heizung", "unique_id": f"{PRINTER_SN}_heizung",
+        "name": "Heating Active", "state_topic": f"{base}/heating", "unique_id": f"{PRINTER_SN}_heizung",
         "object_id": "panda_heating_active",
         "device": dev, "payload_on": "ON", "payload_off": "OFF", "device_class": "heat", "icon": "mdi:radiator"
     }), retain=True)
@@ -848,7 +850,7 @@ def setup_mqtt_discovery(client):
     }), retain=True)
 
     client.publish(f"homeassistant/button/{base}_heizung_stop/config", json.dumps({
-        "name": "Heat Stop", "command_topic": f"{base}/heizung_stop/set",
+        "name": "Heat Stop", "command_topic": f"{base}/heat_stop/set",
         "unique_id": f"{PRINTER_SN}_heizung_stop_btn", "object_id": "panda_heat_stop",
         "device": dev, "icon": "mdi:radiator-off"
     }), retain=True)
@@ -953,6 +955,7 @@ async def update_limits_from_ws():
     global global_heating_state, last_switch_time
     global last_live_log_state, last_live_log_time
     global last_stop_command_time, cc2_paused_for_preheat
+    global _last_heat_status, _last_heat_log_time
     uri = f"ws://{PANDA_IP}/ws"
 
     while True:
@@ -1293,13 +1296,15 @@ async def update_limits_from_ws():
                         elif power_forced_off or work_mode_live not in (1, 2, 3):
                             target_state, info = RELAY_OFF, "Standby"
 
+                        _cc2_printing = CC2_IP and current_data.get("cc2_print_status", "idle") in {
+                            "printing", "preheating", "paused", "pausing", "resuming", "stopping"
+                        }
+
                         elif work_mode_live == 3:
                             if ist < (target - HYSTERESE):
                                 target_state, info = RELAY_ON, "Heating..."
-                            elif ist >= target:
-                                target_state, info = RELAY_OFF, "Hysterese"
                             else:
-                                target_state, info = RELAY_OFF, "Hysterese"
+                                target_state, info = RELAY_OFF, "At Temperature"
 
                         elif work_mode_live == 1:
                             # CC2 mode: skip bed sensor check — device can't see CC2's Klipper,
@@ -1308,18 +1313,16 @@ async def update_limits_from_ws():
                                 target_state, info = RELAY_OFF, "Done"
                             elif ist < (target - HYSTERESE):
                                 target_state, info = RELAY_ON, "Heating..."
-                            elif ist >= target:
-                                target_state, info = RELAY_OFF, "Hysterese"
                             else:
-                                target_state, info = RELAY_OFF, "Hysterese"
+                                target_state, info = RELAY_OFF, "At Temperature"
 
                         elif work_mode_live == 2:
-                            if ist < (target - HYSTERESE):
+                            if CC2_IP and (target == 0 or not _cc2_printing):
+                                target_state, info = RELAY_OFF, "Idle"
+                            elif ist < (target - HYSTERESE):
                                 target_state, info = RELAY_ON, "Heating..."
-                            elif ist >= target:
-                                target_state, info = RELAY_OFF, "Hysterese"
                             else:
-                                target_state, info = RELAY_OFF, "Hysterese"
+                                target_state, info = RELAY_OFF, "At Temperature"
 
                         else:
                             target_state, info = RELAY_OFF, "Standby"
@@ -1377,7 +1380,7 @@ async def update_limits_from_ws():
                                         heat_cmd["work_mode"] = 2
                                     await panda_ws.send(json.dumps({"settings": heat_cmd}))
                                     # Poll immediately so device confirms isrunning=1 and
-                                    # heizung flips to ON within ~0.5s instead of ~10s.
+                                    # heating flips to ON within ~0.5s instead of ~10s.
                                     await asyncio.sleep(0.3)
                                     await panda_ws.send(json.dumps({"get_settings": 1}))
                                 except Exception as e:
@@ -1387,8 +1390,39 @@ async def update_limits_from_ws():
                         fan_state = "ON" if bed_ist >= float(current_data.get("filtertemp", 30.0)) else "OFF"
                         actual_heating = (panda_running and work_on_live in (1, True, "1"))
 
+                        # State-transition logging — always on, not gated by DEBUG
+                        _now_log = time.time()
+                        if info != _last_heat_status:
+                            if info == "Heating...":
+                                log_event(
+                                    f"[HEAT-ON] Chamber {ist:.0f}°C — target {target:.0f}°C "
+                                    f"(threshold {target - HYSTERESE:.0f}°C) — heater starting",
+                                    force_console=True
+                                )
+                            elif _last_heat_status == "Heating..." and info == "At Temperature":
+                                log_event(
+                                    f"[HEAT-OFF] Chamber {ist:.0f}°C reached target {target:.0f}°C — heater off",
+                                    force_console=True
+                                )
+                            elif info == "Idle":
+                                log_event("[IDLE] No active CC2 print — heater standby", force_console=True)
+                            elif info == "At Temperature" and _last_heat_status not in ("Heating...", ""):
+                                log_event(
+                                    f"[AT-TEMP] Chamber {ist:.0f}/{target:.0f}°C — within hysteresis, holding",
+                                    force_console=True
+                                )
+                            _last_heat_status = info
+                            _last_heat_log_time = _now_log
+                        elif (_now_log - _last_heat_log_time) >= 60:
+                            log_event(
+                                f"[STATUS] Chamber {ist:.0f}/{target:.0f}°C | "
+                                f"Heat:{'ON' if actual_heating else 'OFF'} | {info}",
+                                force_console=True
+                            )
+                            _last_heat_log_time = _now_log
+
                         mqtt_client.publish(
-                            f"{MQTT_TOPIC_PREFIX}/heizung",
+                            f"{MQTT_TOPIC_PREFIX}/heating",
                             "ON" if actual_heating else "OFF",
                             retain=True
                         )
@@ -1559,6 +1593,10 @@ async def handle_panda(reader, writer):
                     if power_forced_off or work_mode not in (1, 2, 3):
                         target_state, info = RELAY_OFF, "Standby"
 
+                    _cc2_printing = CC2_IP and current_data.get("cc2_print_status", "idle") in {
+                        "printing", "preheating", "paused", "pausing", "resuming", "stopping"
+                    }
+
                     elif work_mode == 3:
                         target = float(last_ws_settings.get("custom_temp", current_data.get("filament_temp", target)))
                         remaining = int(last_ws_settings.get("remaining_seconds", 0) or 0)
@@ -1568,7 +1606,7 @@ async def handle_panda(reader, writer):
                         elif ist < (target - HYSTERESE):
                             target_state, info = RELAY_ON, "Heating..."
                         else:
-                            target_state, info = RELAY_OFF, "Hysterese"
+                            target_state, info = RELAY_OFF, "At Temperature"
 
                     elif work_mode == 1:
                         if not CC2_IP and bed_ist <= limit:
@@ -1576,13 +1614,15 @@ async def handle_panda(reader, writer):
                         elif ist < (target - HYSTERESE):
                             target_state, info = RELAY_ON, "Heating..."
                         else:
-                            target_state, info = RELAY_OFF, "Hysterese"
+                            target_state, info = RELAY_OFF, "At Temperature"
 
                     elif work_mode == 2:
-                        if ist < (target - HYSTERESE):
+                        if CC2_IP and (target == 0 or not _cc2_printing):
+                            target_state, info = RELAY_OFF, "Idle"
+                        elif ist < (target - HYSTERESE):
                             target_state, info = RELAY_ON, "Heating..."
                         else:
-                            target_state, info = RELAY_OFF, "Hysterese"
+                            target_state, info = RELAY_OFF, "At Temperature"
 
                     else:
                         target_state, info = RELAY_OFF, "Standby"
