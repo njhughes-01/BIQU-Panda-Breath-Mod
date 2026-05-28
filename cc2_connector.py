@@ -193,22 +193,22 @@ def publish_active_filament(tray_id: int) -> None:
         filament_type = (tray.get("filament_type") or tray.get("material") or
                          tray.get("type") or tray.get("filament") or "")
 
-    # 2. Scan all trays for any non-empty filament field
+    # 2. Filename-based detection — more reliable than tray scan when active_tray_id is unknown
+    if not filament_type:
+        current_file = printer_state.get("print_status", {}).get("filename", "")
+        filament_type = _filament_from_filename(current_file)
+        if filament_type:
+            logger.info(f"Filament type from filename '{current_file}': {filament_type}")
+
+    # 3. Scan all trays for any non-empty filament field (last-resort tray fallback)
     if not filament_type:
         for t in trays:
             ft = (t.get("filament_type") or t.get("material") or
                   t.get("type") or t.get("filament") or "")
             if ft:
                 filament_type = ft
-                logger.info(f"active_tray_id unavailable, using first tray with filament: {filament_type}")
+                logger.info(f"Filename unavailable, using first tray with filament: {filament_type}")
                 break
-
-    # 3. Filename-based detection
-    if not filament_type:
-        current_file = printer_state.get("print_stats", {}).get("filename", "")
-        filament_type = _filament_from_filename(current_file)
-        if filament_type:
-            logger.info(f"Filament type from filename '{current_file}': {filament_type}")
 
     # 4. Nozzle target temp as last resort
     if not filament_type:
