@@ -1495,7 +1495,7 @@ async def update_limits_from_ws():
                             current_data.get("slicer_priority_mode", False)
                             or time_passed > MIN_SWITCH_TIME
                         )
-                    ) or (target_state == RELAY_ON and not panda_running):
+                    ) or (target_state == RELAY_ON and not panda_running and info == "Heating..."):
                         if not panda_ws:
                             log_event(f"[AUTO-ON-WARN] Panda not connected — cannot start heating to {int(target)}°C (chamber={ist:.1f}°C)", force_console=True)
                         else:
