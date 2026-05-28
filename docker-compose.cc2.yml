@@ -10,6 +10,12 @@
 #   - CC2_IP and CC2_SN must be set in .env or as stack environment variables.
 #   - LAN-only mode must be enabled on the CC2 printer:
 #       Settings -> Network -> LAN Only Mode -> Enable
+#
+# IOT network mode (macvlan):
+#   Containers get real IPs on your IoT LAN (10.88.88.0/24), same subnet as the CC2 and Panda Breath.
+#   Set PANDA_BACKEND_IP to a free static IP on that subnet (e.g. 10.88.88.50).
+#   Set PANDA_HOST_IP to the same value so the Panda Touch can reach port 8883 directly.
+#   Requires an external Docker macvlan network named "IOT" already created on the host.
 
 services:
   panda_backend:
@@ -18,8 +24,9 @@ services:
     image: ghcr.io/njhughes-01/biqu-panda-breath-mod:latest
     command: python3 Panda.py
     restart: unless-stopped
-    ports:
-      - "8883:8883"
+    networks:
+      IOT:
+        ipv4_address: ${PANDA_BACKEND_IP:-}
     environment:
       HA_MQTT_BROKER: ${HA_MQTT_BROKER:-mosquitto}
       HA_MQTT_PORT: ${HA_MQTT_PORT:-1883}
@@ -48,8 +55,8 @@ services:
     image: ghcr.io/njhughes-01/biqu-panda-breath-mod:latest
     command: python3 panda_web.py
     restart: unless-stopped
-    ports:
-      - "${PANDA_WEB_PORT:-8088}:8080"
+    networks:
+      - IOT
     environment:
       HA_MQTT_BROKER: ${HA_MQTT_BROKER:-mosquitto}
       HA_MQTT_PORT: ${HA_MQTT_PORT:-1883}
@@ -69,6 +76,8 @@ services:
     image: ghcr.io/njhughes-01/biqu-panda-breath-mod:latest
     command: python3 cc2_connector.py
     restart: unless-stopped
+    networks:
+      - IOT
     environment:
       CC2_IP: ${CC2_IP:-}
       CC2_USER: ${CC2_USER:-elegoo}
@@ -93,3 +102,7 @@ services:
 
 volumes:
   panda_certs:
+
+networks:
+  IOT:
+    external: true
