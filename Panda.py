@@ -288,6 +288,8 @@ def on_mqtt_message(client, userdata, msg):
                 if prev_status in _cc2_printing_states and new_status not in _cc2_printing_states:
                     current_data["kammer_soll"] = 0.0
                     mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", 0, retain=True)
+                    # Clear retained active_filament_type so next print doesn't preheat-pause immediately
+                    mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/active_filament_type", "", retain=True)
                     log_event(f"[CC2-SLICER] Print ended ({prev_status}→{new_status}), turning off chamber heater", force_console=True)
                     if cc2_paused_for_preheat:
                         cc2_paused_for_preheat = False
@@ -297,6 +299,31 @@ def on_mqtt_message(client, userdata, msg):
                         except Exception as e:
                             log_event(f"[CC2-OFF-ERR] Failed to turn off heater at print end: {e}", force_console=True)
                     asyncio.run_coroutine_threadsafe(_cc2_off(), main_loop)
+                # Re-arm heating when print starts — handles retained active_filament_type
+                # arriving before print_status on MQTT reconnect
+                elif prev_status not in _cc2_printing_states and new_status in _cc2_printing_states:
+                    kammer = float(current_data.get("kammer_soll", 0))
+                    if kammer > 0 and (panda_ws or panda_writer):
+                        chamber_now = safe_float(current_data.get("kammer_ist", 0), 0)
+                        needs_preheat = chamber_now < (kammer - 5) and not cc2_paused_for_preheat
+                        async def _cc2_heat_on_start(t=int(kammer), pause=needs_preheat):
+                            global cc2_paused_for_preheat
+                            try:
+                                await panda_send(json.dumps({"settings": {"isrunning": 0}}))
+                                await asyncio.sleep(0.2)
+                                await panda_send(json.dumps({
+                                    "settings": {"work_mode": 2, "work_on": True, "set_temp": t, "isrunning": 1}
+                                }))
+                            except Exception as e:
+                                log_event(f"[CC2-START-HEAT-ERR] {e}", force_console=True)
+                                return
+                            if pause:
+                                log_event(f"[CC2-SLICER] Chamber cold ({chamber_now:.0f}°C), pausing CC2 until {t}°C reached", force_console=True)
+                                await asyncio.sleep(1.5)
+                                mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/pause_print/press", "", qos=1)
+                                cc2_paused_for_preheat = True
+                        asyncio.run_coroutine_threadsafe(_cc2_heat_on_start(), main_loop)
+                        log_event(f"[CC2-SLICER] Print started, re-arming chamber heat to {kammer:.0f}°C", force_console=True)
             elif cc2_key in (
                 "nozzle_temp", "print_progress",
                 "filament_detected", "remaining_time", "current_layer",
@@ -347,7 +374,15 @@ def on_mqtt_message(client, userdata, msg):
                             cc2_paused_for_preheat = True
                     asyncio.run_coroutine_threadsafe(_cc2_heat(), main_loop)
                 elif int(target) == 0:
-                    log_event(f"[CC2-SLICER] {val} needs no chamber heat (target=0), heater stays off", force_console=True)
+                    current_data["kammer_soll"] = 0.0
+                    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", 0, retain=True)
+                    async def _cc2_off_no_heat():
+                        try:
+                            await panda_send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "set_temp": 0}}))
+                        except Exception as e:
+                            log_event(f"[CC2-OFF-ERR] {e}", force_console=True)
+                    asyncio.run_coroutine_threadsafe(_cc2_off_no_heat(), main_loop)
+                    log_event(f"[CC2-SLICER] {val} needs no chamber heat — heater off", force_console=True)
                 else:
                     log_event("[CC2-SLICER] Panda not connected, heating queued in kammer_soll", force_console=True)
         except Exception as e:
@@ -438,10 +473,14 @@ def on_mqtt_message(client, userdata, msg):
     # ------------------------------------------------------------
     if msg.topic == f"{MQTT_TOPIC_PREFIX}/heizung_stop/set":
         log_event(">>> !!! EMERGENCY STOP & LOCK !!! <<<", force_console=True)
-        
-        global_lock = True    
-        heating_locked = True 
+
+        global_lock = True
+        heating_locked = True
         global_heating_state = 20.0  # 🔥 FIX: Heizung SOFORT logisch ausschalten
+        if cc2_paused_for_preheat:
+            cc2_paused_for_preheat = False
+            mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/resume_print/press", "", qos=1)
+            log_event("[CC2] Resuming CC2 before emergency stop", force_console=True)
 
         async def stop_flow():
             if panda_ws:
@@ -595,6 +634,10 @@ def on_mqtt_message(client, userdata, msg):
             log_event(">>> PANDA POWER OFF <<<", force_console=True)
             heating_locked = True
             power_forced_off = True
+            if cc2_paused_for_preheat:
+                cc2_paused_for_preheat = False
+                mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/resume_print/press", "", qos=1)
+                log_event("[CC2] Resuming CC2 before heater power off", force_console=True)
 
             async def hard_power_off():
                 try:
@@ -1291,6 +1334,7 @@ async def update_limits_from_ws():
                 log_event(f"[WS] Connection error ({PANDA_IP}): {err}", force_console=True)
 
             panda_ws = None
+            bind_confirmed = False  # Force work_mode=2 re-sync on next connect
             await asyncio.sleep(5)
 
 async def bind_watchdog():
