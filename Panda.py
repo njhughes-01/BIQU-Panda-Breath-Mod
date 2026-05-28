@@ -338,7 +338,7 @@ def on_mqtt_message(client, userdata, msg):
                         effective_chamber = min(chamber_now, cc2_chamber_now) if cc2_chamber_now > 5.0 else chamber_now
                         needs_preheat = effective_chamber < (chamber_target - 5) and not cc2_paused_for_preheat
                         async def _cc2_heat_on_start(t=int(chamber_target), pause=needs_preheat):
-                            global cc2_paused_for_preheat
+                            global cc2_paused_for_preheat, global_heating_state
                             try:
                                 await panda_send(json.dumps({"settings": {"isrunning": 0}}))
                                 await asyncio.sleep(0.2)
@@ -347,6 +347,7 @@ def on_mqtt_message(client, userdata, msg):
                                 }))
                                 await asyncio.sleep(0.3)
                                 await panda_send(json.dumps({"get_settings": 1}))
+                                global_heating_state = RELAY_ON
                             except Exception as e:
                                 log_event(f"[CC2-START-HEAT-ERR] {e}", force_console=True)
                                 return
@@ -406,7 +407,7 @@ def on_mqtt_message(client, userdata, msg):
                     # Don't re-pause on MQTT reconnect delivering retained active_filament_type
                     needs_preheat = effective_chamber < (float(target) - 5) and not cc2_paused_for_preheat
                     async def _cc2_heat(t=int(target), pause=needs_preheat):
-                        global cc2_paused_for_preheat
+                        global cc2_paused_for_preheat, global_heating_state
                         try:
                             await panda_send(json.dumps({"settings": {"isrunning": 0}}))
                             await asyncio.sleep(0.2)
@@ -420,6 +421,7 @@ def on_mqtt_message(client, userdata, msg):
                             }))
                             await asyncio.sleep(0.3)
                             await panda_send(json.dumps({"get_settings": 1}))
+                            global_heating_state = RELAY_ON  # update immediately; GUI shows ON without waiting for WS confirm
                         except Exception as e:
                             log_event(f"[CC2-HEAT-ERR] Failed to send heat command (target={t}°C): {e}", force_console=True)
                             return
@@ -1020,7 +1022,7 @@ async def update_limits_from_ws():
 
         # ===== NORMALER WS BETRIEB =====
         try:
-            async with websockets.connect(uri, ping_interval=None, ping_timeout=None, close_timeout=1) as websocket:
+            async with websockets.connect(uri, ping_interval=None, ping_timeout=None, close_timeout=1, open_timeout=5) as websocket:
 
                 log_event(f"[WS] Connected to Panda {PANDA_IP}")
                 panda_ws = websocket
@@ -1080,7 +1082,10 @@ async def update_limits_from_ws():
                             # Re-sync heating state after reconnect — if heater was
                             # supposed to be on before WS dropped, re-send the command.
                             chamber_target = float(current_data.get("chamber_setpoint", 0))
-                            if chamber_target > 0 and not power_forced_off and not global_lock:
+                            _reconnect_printing = (not CC2_IP) or current_data.get("cc2_print_status", "idle") in {
+                                "printing", "preheating", "paused", "pausing", "resuming", "stopping"
+                            }
+                            if chamber_target > 0 and not power_forced_off and not global_lock and _reconnect_printing:
                                 log_event(f"[WS-RECONNECT] Resuming heat to {chamber_target:.0f}°C after WS reconnect", force_console=True)
                                 await websocket.send(json.dumps({
                                     "settings": {
@@ -1092,6 +1097,7 @@ async def update_limits_from_ws():
                                 }))
                                 await asyncio.sleep(0.3)
                                 await websocket.send(json.dumps({"get_settings": 1}))
+                                global_heating_state = RELAY_ON
 
                         incoming_settings = data['settings']
 
@@ -1519,7 +1525,7 @@ async def update_limits_from_ws():
             # Publish status while WS is down so HA MQTT keepalive timer resets every 5s
             # (without this, no data flows to HA during reconnect → keepalive timeout at 60s)
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/status", "Panda Breath offline", retain=True)
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
 
 async def bind_watchdog():
     global bind_confirmed, bind_warning_shown
