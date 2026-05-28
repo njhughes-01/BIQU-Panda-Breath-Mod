@@ -87,8 +87,8 @@ HA_TOKEN = CONFIG["HA_TOKEN"]
 # sucht M191 Sxx / M141 Sxx und setzt slicer_soll.
 # ============================================================
 PRINTER_IP = CONFIG["PRINTER_IP"]
-CC2_IP = os.environ.get("CC2_IP", "")
-CC2_TOPIC_PREFIX = os.environ.get("CC2_TOPIC_PREFIX", CONFIG.get("CC2_TOPIC_PREFIX", "cc2"))
+CC2_IP = CONFIG.get("CC2_IP", os.environ.get("CC2_IP", ""))
+CC2_TOPIC_PREFIX = CONFIG.get("CC2_TOPIC_PREFIX", os.environ.get("CC2_TOPIC_PREFIX", "cc2"))
 
 # Filament type → chamber target (°C). Override via CC2_FILAMENT_MAP env var (JSON).
 _DEFAULT_FILAMENT_MAP = {
@@ -763,6 +763,10 @@ def setup_mqtt():
 
 mqtt_client = setup_mqtt()
 log_event("[MQTT] Backend logging topic active", force_console=True)
+if CC2_IP:
+    log_event(f"[CONFIG] CC2 mode — CC2_IP={CC2_IP} CC2_TOPIC={CC2_TOPIC_PREFIX} FILAMENT_MAP={list(FILAMENT_CHAMBER_MAP.keys())}", force_console=True)
+else:
+    log_event(f"[CONFIG] Traditional mode — PRINTER_IP={PRINTER_IP}", force_console=True)
     
 
 async def panda_send(payload: str) -> None:
@@ -864,6 +868,15 @@ async def update_limits_from_ws():
                         if not bind_confirmed:
                             bind_confirmed = True
                             bind_warning_shown = False
+                            # In CC2 mode force Manual (work_mode=2) immediately —
+                            # the device may retain work_mode=1 from a prior session,
+                            # and in AUTO mode it uses its own Klipper bed-temp logic
+                            # which can't reach CC2's API, so it would block heating.
+                            if CC2_IP and not power_forced_off:
+                                await websocket.send(json.dumps({
+                                    "settings": {"work_mode": 2}
+                                }))
+                                log_event("[CC2] Forced work_mode=2 (Manual) on connect", force_console=True)
 
                         incoming_settings = data['settings']
 
@@ -1097,7 +1110,9 @@ async def update_limits_from_ws():
                                 target_state, info = 20.0, "Hysterese"
 
                         elif work_mode_live == 1:
-                            if bed_ist <= limit:
+                            # CC2 mode: skip bed sensor check — device can't see CC2's Klipper,
+                            # so bed_ist stays 0 and the "Done" branch would block heating.
+                            if not CC2_IP and bed_ist <= limit:
                                 target_state, info = 20.0, "Done"
                             elif ist < (target - HYSTERESE):
                                 target_state, info = 85.0, "Heating..."
@@ -1357,7 +1372,7 @@ async def handle_panda(reader, writer):
                             target_state, info = 20.0, "Hysterese"
 
                     elif work_mode == 1:
-                        if bed_ist <= limit:
+                        if not CC2_IP and bed_ist <= limit:
                             target_state, info = 20.0, "Done"
                         elif ist < (target - HYSTERESE):
                             target_state, info = 85.0, "Heating..."
@@ -1458,7 +1473,8 @@ async def main():
     global main_loop
     main_loop = asyncio.get_running_loop()
     asyncio.create_task(update_limits_from_ws())
-    asyncio.create_task(slicer_auto_parser())
+    if not CC2_IP:
+        asyncio.create_task(slicer_auto_parser())
     ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     ssl_ctx.load_cert_chain(certfile=str(BASE_DIR / "cert.pem"), keyfile=str(BASE_DIR / "key.pem"))
     

@@ -27,6 +27,7 @@ def generate_config(env=None):
         "HA_BASE_URL": env.get("HA_BASE_URL", ""),
         "HA_TOKEN": env.get("HA_TOKEN", ""),
         "PRINTER_IP": env.get("PANDA_IP", ""),
+        "CC2_IP": env.get("CC2_IP", ""),
         "CC2_TOPIC_PREFIX": env.get("CC2_TOPIC_PREFIX", "cc2"),
     }
 
