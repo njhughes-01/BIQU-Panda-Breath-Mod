@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-05-28
+
+### Fixed
+- **WS recv() blocks indefinitely** — Panda Breath device only sends settings messages reactively;
+  after the initial bind exchange the loop sat at `await websocket.recv()` forever, so temperature
+  comparisons and heat on/off logic never ran again. Fixed with `asyncio.wait_for(recv, timeout=10)`
+  — if the device goes quiet for 10s, panda_backend sends `{"get_settings": 1}` to poll it.
+  This is why HA showed "Heating Active" from the single bind response but never updated again.
+- **panda_web slow startup** — `mqtt_client.connect()` (blocking) in the MQTT thread could stall
+  before the HTTP server started; switched to `connect_async` + `keepalive=120` to match other
+  clients
+
 ## [2.0.1] - 2026-05-28
 
 ### Fixed

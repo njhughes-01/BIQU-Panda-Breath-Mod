@@ -16,7 +16,7 @@ BASE_DIR = Path(__file__).resolve().parent
 # - Entfernt NICHTS: Original bleibt, Erweiterungen sind additiv/ersetzend innerhalb
 #   der bestehenden Struktur (nur ergänzt/erweitert).
 # ============================================================
-PANDA_VERSION = "v2.0.1"
+PANDA_VERSION = "v2.0.2"
 last_reported_mode = None
 mode_change_hint = ""
 heating_locked = False
@@ -989,7 +989,16 @@ async def update_limits_from_ws():
                 asyncio.create_task(bind_watchdog())
 
                 while True:
-                    msg = await websocket.recv()
+                    try:
+                        msg = await asyncio.wait_for(websocket.recv(), timeout=10.0)
+                    except asyncio.TimeoutError:
+                        # Device went quiet — poll for current settings so temperature
+                        # comparisons and heating logic keep running every ≤10s.
+                        try:
+                            await websocket.send(json.dumps({"get_settings": 1}))
+                        except Exception:
+                            pass
+                        continue
                     data = json.loads(msg)
 
                     if global_lock:
