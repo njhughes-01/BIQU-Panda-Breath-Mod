@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio, ssl, json, time, requests, websockets, os, socket, threading
+import base64, secrets
 import logging
 import paho.mqtt.client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
@@ -963,6 +964,90 @@ else:
     log_event(f"[CONFIG] Traditional mode — PRINTER_IP={PRINTER_IP}", force_console=True)
     
 
+class _RawWS:
+    """
+    Minimal WebSocket client tolerant of ESP32 firmware quirks.
+
+    The Panda Breath runs an ESP32 WS server that occasionally sends
+    fragmented control frames and unknown opcodes — both are spec violations
+    that Python's strict `websockets` library rejects with a 1002 close,
+    causing a reconnect storm.  This class skips spec enforcement: unknown
+    opcodes and fragmented control frames are silently discarded; inbound
+    pings are auto-ponged.  The send/recv interface is identical to
+    websockets.WebSocketClientProtocol so the rest of the code is unchanged.
+    """
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        self._r = reader
+        self._w = writer
+
+    async def send(self, msg: str) -> None:
+        data = msg.encode()
+        n = len(data)
+        if n < 126:
+            self._w.write(bytes([0x81, n]) + data)
+        elif n < 65536:
+            self._w.write(bytes([0x81, 126, n >> 8, n & 0xFF]) + data)
+        else:
+            self._w.write(bytes([0x81, 127]) + n.to_bytes(8, 'big') + data)
+        await self._w.drain()
+
+    async def recv(self) -> str:
+        while True:
+            hdr = await self._r.readexactly(2)
+            opcode = hdr[0] & 0x0F
+            masked = bool(hdr[1] & 0x80)
+            n = hdr[1] & 0x7F
+            if n == 126:
+                n = int.from_bytes(await self._r.readexactly(2), 'big')
+            elif n == 127:
+                n = int.from_bytes(await self._r.readexactly(8), 'big')
+            mask = (await self._r.readexactly(4)) if masked else b''
+            payload = (await self._r.readexactly(n)) if n else b''
+            if masked and mask:
+                payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+            if opcode in (0x00, 0x01, 0x02):        # continuation / text / binary
+                return payload.decode(errors='replace')
+            if opcode == 0x08:                       # close frame
+                raise ConnectionError("WS close frame received from device")
+            if opcode == 0x09:                       # ping → pong
+                self._w.write(bytes([0x8A, 0]))
+                await self._w.drain()
+            # 0x0A pong, reserved/unknown/fragmented control → silently skip
+
+    def close(self) -> None:
+        try:
+            self._w.close()
+        except Exception:
+            pass
+
+
+async def _connect_raw_ws(host: str) -> _RawWS:
+    """Open a plain TCP connection to host:80 and perform the WS upgrade handshake."""
+    reader, writer = await asyncio.wait_for(asyncio.open_connection(host, 80), timeout=5.0)
+    key = base64.b64encode(secrets.token_bytes(16)).decode()
+    writer.write(
+        f"GET /ws HTTP/1.1\r\n"
+        f"Host: {host}\r\n"
+        f"Upgrade: websocket\r\n"
+        f"Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n"
+        f"Sec-WebSocket-Version: 13\r\n"
+        f"\r\n".encode()
+    )
+    await writer.drain()
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        chunk = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+        if not chunk:
+            writer.close()
+            raise ConnectionError("Server closed connection during WS handshake")
+        buf += chunk
+    if b" 101 " not in buf:
+        writer.close()
+        raise ConnectionError(f"WS upgrade rejected: {buf[:120]!r}")
+    return _RawWS(reader, writer)
+
+
 async def panda_send(payload: str) -> None:
     """Send a JSON command to the Panda device via whichever path is active."""
     if panda_ws:
@@ -994,10 +1079,8 @@ async def update_limits_from_ws():
         if global_lock:
 
             try:
-                # Neue frische Verbindung erzwingen
-                async with websockets.connect(f"ws://{PANDA_IP}/ws", ping_interval=None, ping_timeout=None, close_timeout=1) as ws:
-
-                    # 1️⃣ BIND (WICHTIG – sonst ignoriert Panda Befehle)
+                ws = await _connect_raw_ws(PANDA_IP)
+                try:
                     await ws.send(json.dumps({
                         "printer": {
                             "ip": HOST_IP,
@@ -1018,6 +1101,8 @@ async def update_limits_from_ws():
                     }))
 
                     await asyncio.sleep(0.5)
+                finally:
+                    ws.close()
 
             except Exception as e:
                 log_event(f"[LOCK STOP ERROR] {e}")
@@ -1027,505 +1112,508 @@ async def update_limits_from_ws():
             continue
 
         # ===== NORMALER WS BETRIEB =====
+        websocket = None
         try:
-            async with websockets.connect(uri, ping_interval=None, ping_timeout=None, close_timeout=1, open_timeout=5) as websocket:
+            websocket = await _connect_raw_ws(PANDA_IP)
 
-                log_event(f"[WS] Connected to Panda {PANDA_IP}")
-                panda_ws = websocket
+            log_event(f"[WS] Connected to Panda {PANDA_IP}")
+            panda_ws = websocket
 
-                # Nur binden wenn NICHT power_forced_off
-                if not power_forced_off:
+            # Nur binden wenn NICHT power_forced_off
+            if not power_forced_off:
 
-                    await websocket.send(json.dumps({
-                        "printer": {
-                            "ip": HOST_IP,
-                            "sn": PRINTER_SN,
-                            "access_code": ACCESS_CODE
-                        }
-                    }))
+                await websocket.send(json.dumps({
+                    "printer": {
+                        "ip": HOST_IP,
+                        "sn": PRINTER_SN,
+                        "access_code": ACCESS_CODE
+                    }
+                }))
 
-                    await websocket.send(json.dumps({
-                        "get_settings": 1
-                    }))
+                await websocket.send(json.dumps({
+                    "get_settings": 1
+                }))
 
-                # ⏳ Bind Watchdog starten
-                asyncio.create_task(bind_watchdog())
+            # ⏳ Bind Watchdog starten
+            asyncio.create_task(bind_watchdog())
 
-                while True:
+            while True:
+                try:
+                    msg = await asyncio.wait_for(websocket.recv(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    # Device went quiet — poll for current settings so temperature
+                    # comparisons and heating logic keep running every ≤10s.
                     try:
-                        msg = await asyncio.wait_for(websocket.recv(), timeout=10.0)
-                    except asyncio.TimeoutError:
-                        # Device went quiet — poll for current settings so temperature
-                        # comparisons and heating logic keep running every ≤10s.
-                        try:
-                            await websocket.send(json.dumps({"get_settings": 1}))
-                        except Exception:
-                            pass
-                        continue
-                    data = json.loads(msg)
+                        await websocket.send(json.dumps({"get_settings": 1}))
+                    except Exception:
+                        pass
+                    continue
+                data = json.loads(msg)
 
-                    if global_lock:
-                        continue
+                if global_lock:
+                    continue
 
-                    # Nur verarbeiten wenn settings enthalten
-                    if 'settings' in data:
+                # Nur verarbeiten wenn settings enthalten
+                if 'settings' in data:
 
-                        # ✅ Bind bestätigt
-                        if not bind_confirmed:
-                            bind_confirmed = True
-                            bind_warning_shown = False
-                            log_event(f"[WS] Bind confirmed — Panda {PANDA_IP} connected", force_console=True)
-                            # In CC2 mode force Manual (work_mode=2) immediately —
-                            # the device may retain work_mode=1 from a prior session,
-                            # and in AUTO mode it uses its own Klipper bed-temp logic
-                            # which can't reach CC2's API, so it would block heating.
-                            if CC2_IP and not power_forced_off:
-                                await websocket.send(json.dumps({
-                                    "settings": {"work_mode": 2}
-                                }))
-                                log_event("[CC2] Forced work_mode=2 (Manual) on connect", force_console=True)
-                                await asyncio.sleep(0.2)
-                            # Re-sync heating state after reconnect — if heater was
-                            # supposed to be on before WS dropped, re-send the command.
-                            chamber_target = float(current_data.get("chamber_setpoint", 0))
-                            _reconnect_printing = (not CC2_IP) or current_data.get("cc2_print_status", "idle") in {
-                                "printing", "preheating", "paused", "pausing", "resuming", "stopping"
-                            }
-                            if chamber_target > 0 and not power_forced_off and not global_lock and _reconnect_printing:
-                                log_event(f"[WS-RECONNECT] Resuming heat to {chamber_target:.0f}°C after WS reconnect", force_console=True)
-                                await websocket.send(json.dumps({
-                                    "settings": {
-                                        "work_mode": 2,
-                                        "work_on": True,
-                                        "set_temp": int(chamber_target),
-                                        "isrunning": 1
-                                    }
-                                }))
-                                await asyncio.sleep(0.3)
-                                await websocket.send(json.dumps({"get_settings": 1}))
-                                global_heating_state = RELAY_ON
-
-                        incoming_settings = data['settings']
-
-                    # NEU: fw_version extrahieren und publishen falls vorhanden
-                        if 'fw_version' in incoming_settings:
-                            mqtt_client.publish(
-                                f"{MQTT_TOPIC_PREFIX}/fw_version",
-                                str(incoming_settings['fw_version']),
-                                retain=True
-                            )
-
-                        last_ws_settings.update(incoming_settings)
-                        s = last_ws_settings
-
-                        # Ist-Temperatur
-                        if 'warehouse_temper' in incoming_settings:
-                            current_data["chamber_temp"] = float(
-                                incoming_settings['warehouse_temper']
-                            )
-                            mqtt_client.publish(
-                                f"{MQTT_TOPIC_PREFIX}/ist",
-                                incoming_settings['warehouse_temper'],
-                                retain=True
-                            )
-
-                        # Auto-resume CC2 if we paused it waiting for chamber to heat.
-                        # Use min(Panda Breath, CC2 sensor) — but only trust CC2 reading
-                        # Resume uses the Panda Breath sensor — it's the controlling sensor
-                        # for the heater and physically near the heating element. The CC2's
-                        # own chamber sensor is in a different location and reads ~10°C cooler
-                        # due to heat gradient; using min() would prevent resume at target.
-                        if cc2_paused_for_preheat:
-                            _target = float(current_data.get("chamber_setpoint", 0))
-                            _pb_ist = float(current_data.get("chamber_temp", 0))
-                            _cc2_ist_raw = float(current_data.get("cc2_chamber_temp", 0.0))
-                            if _target > 0 and _pb_ist >= (_target - PREHEAT_RESUME_OFFSET):
-                                log_event(f"[CC2-SLICER] Chamber ready PB:{_pb_ist:.0f}°C CC2:{_cc2_ist_raw:.0f}°C (resume threshold {_target - PREHEAT_RESUME_OFFSET:.0f}°C) — resuming CC2 print", force_console=True)
-                                cc2_paused_for_preheat = False
-                                if current_data.get("cc2_print_status") == "paused":
-                                    mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/resume_print/press", "", qos=1)
-                                else:
-                                    log_event(f"[CC2-SLICER] CC2 not paused (status={current_data.get('cc2_print_status')!r}), skip resume", force_console=True)
-
-                        # CC2 mode: bed_temp updated via MQTT subscription
-                        # Traditional mode: fetch from HA REST API
-                        if not CC2_IP:
-                            try:
-                                ha_resp = requests.get(
-                                    HA_URL,
-                                    headers={"Authorization": f"Bearer {HA_TOKEN}"},
-                                    timeout=2
-                                )
-                                ha_resp.raise_for_status()
-                                ha_json = ha_resp.json()
-                                if isinstance(ha_json, dict):
-                                    raw_state = str(ha_json.get("state", "")).strip()
-                                else:
-                                    raw_state = str(ha_json).strip()
-                                current_data["bed_temp"] = safe_float(raw_state, 0.0)
-                            except Exception:
-                                pass
-
-                        mqtt_client.publish(
-                            f"{MQTT_TOPIC_PREFIX}/bed",
-                            f"{safe_float(current_data.get('bed_temp', 0)):.1f}",
-                            retain=True
-                        )
-
-                        # ===== SET_TEMP SYNC =====
-                        if 'set_temp' in incoming_settings:
-
-                            ws_temp = float(incoming_settings['set_temp'])
-                            slicer_active = current_data.get("slicer_priority_mode", False)
-                            ws_work_mode = int(s.get("work_mode", 0) or 0)
-                            ws_work_on = s.get("work_on") in (1, True, "1")
-
-                            if slicer_active:
-                                if ws_temp > 0:
-                                    current_data["chamber_setpoint"] = ws_temp
-                                    mqtt_client.publish(
-                                        f"{MQTT_TOPIC_PREFIX}/soll",
-                                        int(ws_temp),
-                                        retain=True
-                                    )
-                            else:
-                                if (
-                                    (time.time() - last_ha_change) > 5.0
-                                    and ws_temp > 0
-                                    and ws_work_mode in (1, 2, 3)
-                                    and ws_work_on
-                                ):
-                                    current_data["chamber_setpoint"] = ws_temp
-                                    mqtt_client.publish(
-                                        f"{MQTT_TOPIC_PREFIX}/soll",
-                                        int(ws_temp),
-                                        retain=True
-                                    )
-
-                        if 'hotbedtemp' in s:
-                            current_data["bed_limit"] = float(s['hotbedtemp'])
-
-                        if 'filtertemp' in s:
-                            current_data["filtertemp"] = float(s['filtertemp'])
-
-                        if 'filament_temp' in s:
-                            current_data["filament_temp"] = int(s['filament_temp'])
-
-                        if 'filament_timer' in s:
-                            current_data["filament_timer"] = int(s['filament_timer'])
-
-                        # ===== MODUS =====
-                        global last_reported_mode, mode_change_hint
-
-                        work_mode = s.get("work_mode")
-                        work_on = s.get("work_on")
-
-                        if global_lock:
-                            modus = "LOCKED"
-                        elif power_forced_off:
-                            modus = "Standby"
-                        else:
-                            if work_mode == 1:
-                                modus = "Automatic"
-                            elif work_mode == 2:
-                                modus = "Manual"
-                            elif work_mode == 3:
-                                modus = "Dry"
-                            else:
-                                modus = "Standby"
-
-                        if modus != last_reported_mode:
-                            mqtt_client.publish(
-                                f"{MQTT_TOPIC_PREFIX}/panda_modus",
-                                modus,
-                                retain=True
-                            )
-                            last_reported_mode = modus
-
-                        # ===== MQTT Sync =====
-                        if (time.time() - last_ha_change) > 8.0:
-
-                            if 'filtertemp' in s:
-                                mqtt_client.publish(
-                                    f"{MQTT_TOPIC_PREFIX}/filtertemp",
-                                    int(s['filtertemp']),
-                                    retain=True
-                                )
-
-                            if 'hotbedtemp' in s:
-                                mqtt_client.publish(
-                                    f"{MQTT_TOPIC_PREFIX}/limit",
-                                    int(s['hotbedtemp']),
-                                    retain=True
-                                )
-
-                            if 'work_on' in s:
-                                global desired_power_state, power_pending_until
-
-                                ws_is_on = s['work_on'] in (True, 1, "1")
-                                now = time.time()
-
-                                # Während Pending: nicht zurückflippen
-                                if desired_power_state is not None and now < power_pending_until:
-                                    p_val = "1" if desired_power_state else "0"
-
-                                    # Sobald bestätigt → Pending löschen
-                                    if ws_is_on == desired_power_state:
-                                        desired_power_state = None
-                                        power_pending_until = 0.0
-
-                                else:
-                                    # Normalbetrieb
-                                    p_val = "0" if power_forced_off else ("1" if ws_is_on else "0")
-
-                                mqtt_client.publish(
-                                    f"{MQTT_TOPIC_PREFIX}/work_on",
-                                    p_val,
-                                    retain=True
-                                )
-
-
-                            if 'filament_temp' in s:
-                                mqtt_client.publish(
-                                    f"{MQTT_TOPIC_PREFIX}/dry_temp",
-                                    int(s['filament_temp']),
-                                    retain=True
-                                )
-
-                            if 'filament_timer' in s:
-                                mqtt_client.publish(
-                                    f"{MQTT_TOPIC_PREFIX}/dry_time",
-                                    int(s['filament_timer']),
-                                    retain=True
-                                )
-
-                            mqtt_client.publish(
-                                f"{MQTT_TOPIC_PREFIX}/slicer_priority_mode",
-                                "ON" if current_data.get("slicer_priority_mode", False) else "OFF",
-                                retain=True
-                            )
-
-                            mqtt_client.publish(
-                                f"{MQTT_TOPIC_PREFIX}/slicer_soll",
-                                int(current_data.get("slicer_soll", 0)),
-                                retain=True
-                            )
-
-                            mqtt_client.publish(
-                                f"{MQTT_TOPIC_PREFIX}/slicer_target_temp",
-                                int(current_data.get("slicer_soll", 0)),
-                                retain=True
-                            )
-
-                            mqtt_client.publish(
-                                f"{MQTT_TOPIC_PREFIX}/slicer_file",
-                                current_data.get("last_analyzed_file", ""),
-                                retain=True
-                            )
-
-                        target = float(current_data.get("chamber_setpoint", 0))
-                        ist = float(current_data.get("chamber_temp", 0))
-                        limit = float(current_data.get("bed_limit", 50))
-                        bed_ist = float(current_data.get("bed_temp", 0))
-                        work_mode_live = int(s.get("work_mode", 0) or 0)
-                        work_on_live = s.get("work_on")
-                        panda_running = s.get("isrunning") in (1, True, "1")
-
-                        _cc2_printing = CC2_IP and current_data.get("cc2_print_status", "idle") in {
+                    # ✅ Bind bestätigt
+                    if not bind_confirmed:
+                        bind_confirmed = True
+                        bind_warning_shown = False
+                        log_event(f"[WS] Bind confirmed — Panda {PANDA_IP} connected", force_console=True)
+                        # In CC2 mode force Manual (work_mode=2) immediately —
+                        # the device may retain work_mode=1 from a prior session,
+                        # and in AUTO mode it uses its own Klipper bed-temp logic
+                        # which can't reach CC2's API, so it would block heating.
+                        if CC2_IP and not power_forced_off:
+                            await websocket.send(json.dumps({
+                                "settings": {"work_mode": 2}
+                            }))
+                            log_event("[CC2] Forced work_mode=2 (Manual) on connect", force_console=True)
+                            await asyncio.sleep(0.2)
+                        # Re-sync heating state after reconnect — if heater was
+                        # supposed to be on before WS dropped, re-send the command.
+                        chamber_target = float(current_data.get("chamber_setpoint", 0))
+                        _reconnect_printing = (not CC2_IP) or current_data.get("cc2_print_status", "idle") in {
                             "printing", "preheating", "paused", "pausing", "resuming", "stopping"
                         }
+                        if chamber_target > 0 and not power_forced_off and not global_lock and _reconnect_printing:
+                            log_event(f"[WS-RECONNECT] Resuming heat to {chamber_target:.0f}°C after WS reconnect", force_console=True)
+                            await websocket.send(json.dumps({
+                                "settings": {
+                                    "work_mode": 2,
+                                    "work_on": True,
+                                    "set_temp": int(chamber_target),
+                                    "isrunning": 1
+                                }
+                            }))
+                            await asyncio.sleep(0.3)
+                            await websocket.send(json.dumps({"get_settings": 1}))
+                            global_heating_state = RELAY_ON
 
-                        if global_lock:
-                            target_state, info = RELAY_OFF, "LOCKED"
+                    incoming_settings = data['settings']
 
-                        elif power_forced_off or work_mode_live not in (1, 2, 3):
-                            target_state, info = RELAY_OFF, "Standby"
+                # NEU: fw_version extrahieren und publishen falls vorhanden
+                    if 'fw_version' in incoming_settings:
+                        mqtt_client.publish(
+                            f"{MQTT_TOPIC_PREFIX}/fw_version",
+                            str(incoming_settings['fw_version']),
+                            retain=True
+                        )
 
-                        elif work_mode_live == 3:
-                            if ist < (target - HYSTERESE):
-                                target_state, info = RELAY_ON, "Heating..."
+                    last_ws_settings.update(incoming_settings)
+                    s = last_ws_settings
+
+                    # Ist-Temperatur
+                    if 'warehouse_temper' in incoming_settings:
+                        current_data["chamber_temp"] = float(
+                            incoming_settings['warehouse_temper']
+                        )
+                        mqtt_client.publish(
+                            f"{MQTT_TOPIC_PREFIX}/ist",
+                            incoming_settings['warehouse_temper'],
+                            retain=True
+                        )
+
+                    # Auto-resume CC2 if we paused it waiting for chamber to heat.
+                    # Use min(Panda Breath, CC2 sensor) — but only trust CC2 reading
+                    # Resume uses the Panda Breath sensor — it's the controlling sensor
+                    # for the heater and physically near the heating element. The CC2's
+                    # own chamber sensor is in a different location and reads ~10°C cooler
+                    # due to heat gradient; using min() would prevent resume at target.
+                    if cc2_paused_for_preheat:
+                        _target = float(current_data.get("chamber_setpoint", 0))
+                        _pb_ist = float(current_data.get("chamber_temp", 0))
+                        _cc2_ist_raw = float(current_data.get("cc2_chamber_temp", 0.0))
+                        if _target > 0 and _pb_ist >= (_target - PREHEAT_RESUME_OFFSET):
+                            log_event(f"[CC2-SLICER] Chamber ready PB:{_pb_ist:.0f}°C CC2:{_cc2_ist_raw:.0f}°C (resume threshold {_target - PREHEAT_RESUME_OFFSET:.0f}°C) — resuming CC2 print", force_console=True)
+                            cc2_paused_for_preheat = False
+                            if current_data.get("cc2_print_status") == "paused":
+                                mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/resume_print/press", "", qos=1)
                             else:
-                                target_state, info = RELAY_OFF, "At Temperature"
+                                log_event(f"[CC2-SLICER] CC2 not paused (status={current_data.get('cc2_print_status')!r}), skip resume", force_console=True)
 
-                        elif work_mode_live == 1:
-                            # CC2 mode: skip bed sensor check — device can't see CC2's Klipper,
-                            # so bed_ist stays 0 and the "Done" branch would block heating.
-                            if not CC2_IP and bed_ist <= limit:
-                                target_state, info = RELAY_OFF, "Done"
-                            elif ist < (target - HYSTERESE):
-                                target_state, info = RELAY_ON, "Heating..."
+                    # CC2 mode: bed_temp updated via MQTT subscription
+                    # Traditional mode: fetch from HA REST API
+                    if not CC2_IP:
+                        try:
+                            ha_resp = requests.get(
+                                HA_URL,
+                                headers={"Authorization": f"Bearer {HA_TOKEN}"},
+                                timeout=2
+                            )
+                            ha_resp.raise_for_status()
+                            ha_json = ha_resp.json()
+                            if isinstance(ha_json, dict):
+                                raw_state = str(ha_json.get("state", "")).strip()
                             else:
-                                target_state, info = RELAY_OFF, "At Temperature"
+                                raw_state = str(ha_json).strip()
+                            current_data["bed_temp"] = safe_float(raw_state, 0.0)
+                        except Exception:
+                            pass
 
-                        elif work_mode_live == 2:
-                            if CC2_IP and (target == 0 or not _cc2_printing):
-                                target_state, info = RELAY_OFF, "Idle"
-                            elif ist < (target - HYSTERESE):
-                                target_state, info = RELAY_ON, "Heating..."
-                            elif CC2_IP and _cc2_printing and target > 0:
-                                # At temperature with active print — keep device ON so its internal
-                                # PID maintains the setpoint. Sending work_on=False here would kill
-                                # the temperature control loop; let the device cycle autonomously.
-                                target_state, info = RELAY_ON, "At Temperature"
-                            else:
-                                target_state, info = RELAY_OFF, "At Temperature"
+                    mqtt_client.publish(
+                        f"{MQTT_TOPIC_PREFIX}/bed",
+                        f"{safe_float(current_data.get('bed_temp', 0)):.1f}",
+                        retain=True
+                    )
 
+                    # ===== SET_TEMP SYNC =====
+                    if 'set_temp' in incoming_settings:
+
+                        ws_temp = float(incoming_settings['set_temp'])
+                        slicer_active = current_data.get("slicer_priority_mode", False)
+                        ws_work_mode = int(s.get("work_mode", 0) or 0)
+                        ws_work_on = s.get("work_on") in (1, True, "1")
+
+                        if slicer_active:
+                            if ws_temp > 0:
+                                current_data["chamber_setpoint"] = ws_temp
+                                mqtt_client.publish(
+                                    f"{MQTT_TOPIC_PREFIX}/soll",
+                                    int(ws_temp),
+                                    retain=True
+                                )
                         else:
-                            target_state, info = RELAY_OFF, "Standby"
+                            if (
+                                (time.time() - last_ha_change) > 5.0
+                                and ws_temp > 0
+                                and ws_work_mode in (1, 2, 3)
+                                and ws_work_on
+                            ):
+                                current_data["chamber_setpoint"] = ws_temp
+                                mqtt_client.publish(
+                                    f"{MQTT_TOPIC_PREFIX}/soll",
+                                    int(ws_temp),
+                                    retain=True
+                                )
 
-                        time_passed = (time.time() - last_switch_time)
+                    if 'hotbedtemp' in s:
+                        current_data["bed_limit"] = float(s['hotbedtemp'])
 
-                        if target_state == RELAY_OFF:
-                            now_stop = time.time()
+                    if 'filtertemp' in s:
+                        current_data["filtertemp"] = float(s['filtertemp'])
 
-                            # V1.0.3 / Klipper bind:
-                            # isrunning=0 alleine reicht nicht mehr, weil die Panda-Firmware
-                            # im Klipper-Auto-Modus den Heizlauf selbst wieder starten kann.
-                            # Darum wird der aktive Lauf mit work_on=False pausiert.
-                            # WICHTIG: work_mode und set_temp bleiben unverändert, damit
-                            # Kammer-Soll und gewählter Modus NICHT verloren gehen.
-                            if global_heating_state != RELAY_OFF:
-                                global_heating_state = RELAY_OFF
-                                last_switch_time = now_stop
+                    if 'filament_temp' in s:
+                        current_data["filament_temp"] = int(s['filament_temp'])
 
-                            if (panda_running or work_on_live in (1, True, "1")) and (now_stop - last_stop_command_time) >= 2.0:
-                                last_stop_command_time = now_stop
-                                try:
-                                    if panda_ws:
-                                        await panda_ws.send(json.dumps({
-                                            "settings": {
-                                                "isrunning": 0,
-                                                "work_on": False
-                                            }
-                                        }))
-                                    else:
-                                        log_event(f"[AUTO-OFF-WARN] Panda not connected — cannot stop heating (chamber={ist:.1f}°C)", force_console=True)
-                                except Exception as e:
-                                    log_event(f"[AUTO-OFF-ERR] chamber={ist:.1f}°C target={target:.1f}°C: {e}", force_console=True)
+                    if 'filament_timer' in s:
+                        current_data["filament_timer"] = int(s['filament_timer'])
 
-                        elif (
-                            target_state != global_heating_state
-                            and (
-                                current_data.get("slicer_priority_mode", False)
-                                or time_passed > MIN_SWITCH_TIME
+                    # ===== MODUS =====
+                    global last_reported_mode, mode_change_hint
+
+                    work_mode = s.get("work_mode")
+                    work_on = s.get("work_on")
+
+                    if global_lock:
+                        modus = "LOCKED"
+                    elif power_forced_off:
+                        modus = "Standby"
+                    else:
+                        if work_mode == 1:
+                            modus = "Automatic"
+                        elif work_mode == 2:
+                            modus = "Manual"
+                        elif work_mode == 3:
+                            modus = "Dry"
+                        else:
+                            modus = "Standby"
+
+                    if modus != last_reported_mode:
+                        mqtt_client.publish(
+                            f"{MQTT_TOPIC_PREFIX}/panda_modus",
+                            modus,
+                            retain=True
+                        )
+                        last_reported_mode = modus
+
+                    # ===== MQTT Sync =====
+                    if (time.time() - last_ha_change) > 8.0:
+
+                        if 'filtertemp' in s:
+                            mqtt_client.publish(
+                                f"{MQTT_TOPIC_PREFIX}/filtertemp",
+                                int(s['filtertemp']),
+                                retain=True
                             )
-                        ) or (target_state == RELAY_ON and not panda_running):
-                            if not panda_ws:
-                                log_event(f"[AUTO-ON-WARN] Panda not connected — cannot start heating to {int(target)}°C (chamber={ist:.1f}°C)", force_console=True)
-                            else:
-                                global_heating_state = target_state
-                                last_switch_time = time.time()
-                                last_stop_command_time = 0
-                                try:
-                                    heat_cmd: dict = {
-                                        "work_on": True,
-                                        "set_temp": int(target),
-                                        "isrunning": 1
-                                    }
-                                    if CC2_IP:
-                                        heat_cmd["work_mode"] = 2
-                                    await panda_ws.send(json.dumps({"settings": heat_cmd}))
-                                    # Poll immediately so device confirms isrunning=1 and
-                                    # heating flips to ON within ~0.5s instead of ~10s.
-                                    await asyncio.sleep(0.3)
-                                    await panda_ws.send(json.dumps({"get_settings": 1}))
-                                except Exception as e:
-                                    log_event(f"[AUTO-ON-ERR] target={int(target)}°C chamber={ist:.1f}°C: {e}", force_console=True)
-                                    global_heating_state = RELAY_OFF  # Reset so next cycle retries
 
-                        fan_state = "ON" if bed_ist >= float(current_data.get("filtertemp", 30.0)) else "OFF"
-                        actual_heating = (panda_running and work_on_live in (1, True, "1"))
-                        # In CC2 mode device confirmation (isrunning) can lag; use our commanded
-                        # state for the Heat tile. In legacy mode use device confirmation.
-                        heating_active = (global_heating_state == RELAY_ON) if CC2_IP else actual_heating
-
-                        # State-transition logging — always on, not gated by DEBUG
-                        _now_log = time.time()
-                        if info != _last_heat_status:
-                            if info == "Heating...":
-                                log_event(
-                                    f"[HEAT-ON] Chamber {ist:.0f}°C — target {target:.0f}°C "
-                                    f"(threshold {target - HYSTERESE:.0f}°C) — heater starting",
-                                    force_console=True
-                                )
-                            elif _last_heat_status == "Heating..." and info == "At Temperature":
-                                log_event(
-                                    f"[HEAT-OFF] Chamber {ist:.0f}°C reached target {target:.0f}°C — heater off",
-                                    force_console=True
-                                )
-                            elif info == "Idle":
-                                log_event("[IDLE] No active CC2 print — heater standby", force_console=True)
-                            elif info == "At Temperature" and _last_heat_status not in ("Heating...", ""):
-                                log_event(
-                                    f"[AT-TEMP] Chamber {ist:.0f}/{target:.0f}°C — within hysteresis, holding",
-                                    force_console=True
-                                )
-                            _last_heat_status = info
-                            _last_heat_log_time = _now_log
-                        elif (_now_log - _last_heat_log_time) >= 60:
-                            log_event(
-                                f"[STATUS] Chamber {ist:.0f}/{target:.0f}°C | "
-                                f"Heat:{'ON' if heating_active else 'OFF'} | {info}",
-                                force_console=True
+                        if 'hotbedtemp' in s:
+                            mqtt_client.publish(
+                                f"{MQTT_TOPIC_PREFIX}/limit",
+                                int(s['hotbedtemp']),
+                                retain=True
                             )
-                            _last_heat_log_time = _now_log
 
-                        mqtt_client.publish(
-                            f"{MQTT_TOPIC_PREFIX}/heating",
-                            "ON" if heating_active else "OFF",
-                            retain=True
-                        )
-                        mqtt_client.publish(
-                            f"{MQTT_TOPIC_PREFIX}/status",
-                            info,
-                            retain=True
-                        )
-                        mqtt_client.publish(
-                            f"{MQTT_TOPIC_PREFIX}/panda_heiz_status",
-                            info,
-                            retain=True
-                        )
-                        mqtt_client.publish(
-                            f"{MQTT_TOPIC_PREFIX}/fan",
-                            fan_state,
-                            retain=True
-                        )
+                        if 'work_on' in s:
+                            global desired_power_state, power_pending_until
 
-                        if DEBUG:
+                            ws_is_on = s['work_on'] in (True, 1, "1")
                             now = time.time()
 
-                            current_live_log_state = (
-                                round(bed_ist, 1),
-                                round(target, 1),
-                                round(ist, 1),
-                                actual_heating,
-                                fan_state,
-                                work_mode_live,
-                                info
+                            # Während Pending: nicht zurückflippen
+                            if desired_power_state is not None and now < power_pending_until:
+                                p_val = "1" if desired_power_state else "0"
+
+                                # Sobald bestätigt → Pending löschen
+                                if ws_is_on == desired_power_state:
+                                    desired_power_state = None
+                                    power_pending_until = 0.0
+
+                            else:
+                                # Normalbetrieb
+                                p_val = "0" if power_forced_off else ("1" if ws_is_on else "0")
+
+                            mqtt_client.publish(
+                                f"{MQTT_TOPIC_PREFIX}/work_on",
+                                p_val,
+                                retain=True
                             )
 
-                            if (
-                                current_live_log_state != last_live_log_state
-                                or (now - last_live_log_time) >= 30
-                            ):
-                                last_live_log_state = current_live_log_state
-                                last_live_log_time = now
 
-                                log_event(
-                                    f"LIVE | Bed:{bed_ist:.1f}°C | Chamber:{target:.1f}/{ist:.1f}°C | "
-                                    f"Heat:{'ON' if actual_heating else 'OFF'} | "
-                                    f"Fan:{fan_state} | Mode:{work_mode_live} | Status:{info}"
-                                )
+                        if 'filament_temp' in s:
+                            mqtt_client.publish(
+                                f"{MQTT_TOPIC_PREFIX}/dry_temp",
+                                int(s['filament_temp']),
+                                retain=True
+                            )
 
+                        if 'filament_timer' in s:
+                            mqtt_client.publish(
+                                f"{MQTT_TOPIC_PREFIX}/dry_time",
+                                int(s['filament_timer']),
+                                retain=True
+                            )
+
+                        mqtt_client.publish(
+                            f"{MQTT_TOPIC_PREFIX}/slicer_priority_mode",
+                            "ON" if current_data.get("slicer_priority_mode", False) else "OFF",
+                            retain=True
+                        )
+
+                        mqtt_client.publish(
+                            f"{MQTT_TOPIC_PREFIX}/slicer_soll",
+                            int(current_data.get("slicer_soll", 0)),
+                            retain=True
+                        )
+
+                        mqtt_client.publish(
+                            f"{MQTT_TOPIC_PREFIX}/slicer_target_temp",
+                            int(current_data.get("slicer_soll", 0)),
+                            retain=True
+                        )
+
+                        mqtt_client.publish(
+                            f"{MQTT_TOPIC_PREFIX}/slicer_file",
+                            current_data.get("last_analyzed_file", ""),
+                            retain=True
+                        )
+
+                    target = float(current_data.get("chamber_setpoint", 0))
+                    ist = float(current_data.get("chamber_temp", 0))
+                    limit = float(current_data.get("bed_limit", 50))
+                    bed_ist = float(current_data.get("bed_temp", 0))
+                    work_mode_live = int(s.get("work_mode", 0) or 0)
+                    work_on_live = s.get("work_on")
+                    panda_running = s.get("isrunning") in (1, True, "1")
+
+                    _cc2_printing = CC2_IP and current_data.get("cc2_print_status", "idle") in {
+                        "printing", "preheating", "paused", "pausing", "resuming", "stopping"
+                    }
+
+                    if global_lock:
+                        target_state, info = RELAY_OFF, "LOCKED"
+
+                    elif power_forced_off or work_mode_live not in (1, 2, 3):
+                        target_state, info = RELAY_OFF, "Standby"
+
+                    elif work_mode_live == 3:
+                        if ist < (target - HYSTERESE):
+                            target_state, info = RELAY_ON, "Heating..."
+                        else:
+                            target_state, info = RELAY_OFF, "At Temperature"
+
+                    elif work_mode_live == 1:
+                        # CC2 mode: skip bed sensor check — device can't see CC2's Klipper,
+                        # so bed_ist stays 0 and the "Done" branch would block heating.
+                        if not CC2_IP and bed_ist <= limit:
+                            target_state, info = RELAY_OFF, "Done"
+                        elif ist < (target - HYSTERESE):
+                            target_state, info = RELAY_ON, "Heating..."
+                        else:
+                            target_state, info = RELAY_OFF, "At Temperature"
+
+                    elif work_mode_live == 2:
+                        if CC2_IP and (target == 0 or not _cc2_printing):
+                            target_state, info = RELAY_OFF, "Idle"
+                        elif ist < (target - HYSTERESE):
+                            target_state, info = RELAY_ON, "Heating..."
+                        elif CC2_IP and _cc2_printing and target > 0:
+                            # At temperature with active print — keep device ON so its internal
+                            # PID maintains the setpoint. Sending work_on=False here would kill
+                            # the temperature control loop; let the device cycle autonomously.
+                            target_state, info = RELAY_ON, "At Temperature"
+                        else:
+                            target_state, info = RELAY_OFF, "At Temperature"
 
                     else:
-                        continue
+                        target_state, info = RELAY_OFF, "Standby"
+
+                    time_passed = (time.time() - last_switch_time)
+
+                    if target_state == RELAY_OFF:
+                        now_stop = time.time()
+
+                        # V1.0.3 / Klipper bind:
+                        # isrunning=0 alleine reicht nicht mehr, weil die Panda-Firmware
+                        # im Klipper-Auto-Modus den Heizlauf selbst wieder starten kann.
+                        # Darum wird der aktive Lauf mit work_on=False pausiert.
+                        # WICHTIG: work_mode und set_temp bleiben unverändert, damit
+                        # Kammer-Soll und gewählter Modus NICHT verloren gehen.
+                        if global_heating_state != RELAY_OFF:
+                            global_heating_state = RELAY_OFF
+                            last_switch_time = now_stop
+
+                        if (panda_running or work_on_live in (1, True, "1")) and (now_stop - last_stop_command_time) >= 2.0:
+                            last_stop_command_time = now_stop
+                            try:
+                                if panda_ws:
+                                    await panda_ws.send(json.dumps({
+                                        "settings": {
+                                            "isrunning": 0,
+                                            "work_on": False
+                                        }
+                                    }))
+                                else:
+                                    log_event(f"[AUTO-OFF-WARN] Panda not connected — cannot stop heating (chamber={ist:.1f}°C)", force_console=True)
+                            except Exception as e:
+                                log_event(f"[AUTO-OFF-ERR] chamber={ist:.1f}°C target={target:.1f}°C: {e}", force_console=True)
+
+                    elif (
+                        target_state != global_heating_state
+                        and (
+                            current_data.get("slicer_priority_mode", False)
+                            or time_passed > MIN_SWITCH_TIME
+                        )
+                    ) or (target_state == RELAY_ON and not panda_running):
+                        if not panda_ws:
+                            log_event(f"[AUTO-ON-WARN] Panda not connected — cannot start heating to {int(target)}°C (chamber={ist:.1f}°C)", force_console=True)
+                        else:
+                            global_heating_state = target_state
+                            last_switch_time = time.time()
+                            last_stop_command_time = 0
+                            try:
+                                heat_cmd: dict = {
+                                    "work_on": True,
+                                    "set_temp": int(target),
+                                    "isrunning": 1
+                                }
+                                if CC2_IP:
+                                    heat_cmd["work_mode"] = 2
+                                await panda_ws.send(json.dumps({"settings": heat_cmd}))
+                                # Poll immediately so device confirms isrunning=1 and
+                                # heating flips to ON within ~0.5s instead of ~10s.
+                                await asyncio.sleep(0.3)
+                                await panda_ws.send(json.dumps({"get_settings": 1}))
+                            except Exception as e:
+                                log_event(f"[AUTO-ON-ERR] target={int(target)}°C chamber={ist:.1f}°C: {e}", force_console=True)
+                                global_heating_state = RELAY_OFF  # Reset so next cycle retries
+
+                    fan_state = "ON" if bed_ist >= float(current_data.get("filtertemp", 30.0)) else "OFF"
+                    actual_heating = (panda_running and work_on_live in (1, True, "1"))
+                    # In CC2 mode device confirmation (isrunning) can lag; use our commanded
+                    # state for the Heat tile. In legacy mode use device confirmation.
+                    heating_active = (global_heating_state == RELAY_ON) if CC2_IP else actual_heating
+
+                    # State-transition logging — always on, not gated by DEBUG
+                    _now_log = time.time()
+                    if info != _last_heat_status:
+                        if info == "Heating...":
+                            log_event(
+                                f"[HEAT-ON] Chamber {ist:.0f}°C — target {target:.0f}°C "
+                                f"(threshold {target - HYSTERESE:.0f}°C) — heater starting",
+                                force_console=True
+                            )
+                        elif _last_heat_status == "Heating..." and info == "At Temperature":
+                            log_event(
+                                f"[HEAT-OFF] Chamber {ist:.0f}°C reached target {target:.0f}°C — heater off",
+                                force_console=True
+                            )
+                        elif info == "Idle":
+                            log_event("[IDLE] No active CC2 print — heater standby", force_console=True)
+                        elif info == "At Temperature" and _last_heat_status not in ("Heating...", ""):
+                            log_event(
+                                f"[AT-TEMP] Chamber {ist:.0f}/{target:.0f}°C — within hysteresis, holding",
+                                force_console=True
+                            )
+                        _last_heat_status = info
+                        _last_heat_log_time = _now_log
+                    elif (_now_log - _last_heat_log_time) >= 60:
+                        log_event(
+                            f"[STATUS] Chamber {ist:.0f}/{target:.0f}°C | "
+                            f"Heat:{'ON' if heating_active else 'OFF'} | {info}",
+                            force_console=True
+                        )
+                        _last_heat_log_time = _now_log
+
+                    mqtt_client.publish(
+                        f"{MQTT_TOPIC_PREFIX}/heating",
+                        "ON" if heating_active else "OFF",
+                        retain=True
+                    )
+                    mqtt_client.publish(
+                        f"{MQTT_TOPIC_PREFIX}/status",
+                        info,
+                        retain=True
+                    )
+                    mqtt_client.publish(
+                        f"{MQTT_TOPIC_PREFIX}/panda_heiz_status",
+                        info,
+                        retain=True
+                    )
+                    mqtt_client.publish(
+                        f"{MQTT_TOPIC_PREFIX}/fan",
+                        fan_state,
+                        retain=True
+                    )
+
+                    if DEBUG:
+                        now = time.time()
+
+                        current_live_log_state = (
+                            round(bed_ist, 1),
+                            round(target, 1),
+                            round(ist, 1),
+                            actual_heating,
+                            fan_state,
+                            work_mode_live,
+                            info
+                        )
+
+                        if (
+                            current_live_log_state != last_live_log_state
+                            or (now - last_live_log_time) >= 30
+                        ):
+                            last_live_log_state = current_live_log_state
+                            last_live_log_time = now
+
+                            log_event(
+                                f"LIVE | Bed:{bed_ist:.1f}°C | Chamber:{target:.1f}/{ist:.1f}°C | "
+                                f"Heat:{'ON' if actual_heating else 'OFF'} | "
+                                f"Fan:{fan_state} | Mode:{work_mode_live} | Status:{info}"
+                            )
+
+
+                else:
+                    continue
 
         except Exception as e:
             err = str(e)
             if "no close frame received or sent" not in err:
                 log_event(f"[WS] Connection error ({PANDA_IP}): {err}", force_console=True)
 
+            if websocket is not None:
+                websocket.close()
             panda_ws = None
             bind_confirmed = False  # Force work_mode=2 re-sync on next connect
             global_heating_state = RELAY_OFF  # Clear stale state so HA doesn't show Heat=ON while offline
