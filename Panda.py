@@ -258,7 +258,7 @@ async def slicer_auto_parser():
 
 # --- MQTT LOGIK ---
 def on_mqtt_message(client, userdata, msg):
-    # ✅ FIX: Alle globalen Deklarationen MÜSSEN am Anfang der Funktion stehen 
+    # ✅ FIX: Alle globalen Deklarationen MÜSSEN am Anfang der Funktion stehen
     global current_data
     global last_ha_change
     global ha_memory
@@ -267,6 +267,7 @@ def on_mqtt_message(client, userdata, msg):
     global global_lock
     global desired_power_state
     global power_pending_until
+    global cc2_paused_for_preheat
     global global_heating_state
     # ============================================================
     # CC2 METRICS — only active when CC2_IP is configured in the environment
@@ -318,7 +319,8 @@ def on_mqtt_message(client, userdata, msg):
                 log_event(f"[CC2-SLICER] {val} → chamber {target}°C", force_console=True)
                 if (panda_ws or panda_writer) and int(target) > 0:
                     chamber_now = safe_float(current_data.get("kammer_ist", 0), 0)
-                    needs_preheat = chamber_now < (float(target) - 5)
+                    # Don't re-pause on MQTT reconnect delivering retained active_filament_type
+                    needs_preheat = chamber_now < (float(target) - 5) and not cc2_paused_for_preheat
                     async def _cc2_heat(t=int(target), pause=needs_preheat):
                         global cc2_paused_for_preheat
                         await panda_send(json.dumps({"settings": {"isrunning": 0}}))
