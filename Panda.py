@@ -331,6 +331,8 @@ def on_mqtt_message(client, userdata, msg):
                                 await panda_send(json.dumps({
                                     "settings": {"work_mode": 2, "work_on": True, "set_temp": t, "isrunning": 1}
                                 }))
+                                await asyncio.sleep(0.3)
+                                await panda_send(json.dumps({"get_settings": 1}))
                             except Exception as e:
                                 log_event(f"[CC2-START-HEAT-ERR] {e}", force_console=True)
                                 return
@@ -398,6 +400,8 @@ def on_mqtt_message(client, userdata, msg):
                                     "isrunning": 1
                                 }
                             }))
+                            await asyncio.sleep(0.3)
+                            await panda_send(json.dumps({"get_settings": 1}))
                         except Exception as e:
                             log_event(f"[CC2-HEAT-ERR] Failed to send heat command (target={t}°C): {e}", force_console=True)
                             return
@@ -1060,6 +1064,8 @@ async def update_limits_from_ws():
                                         "isrunning": 1
                                     }
                                 }))
+                                await asyncio.sleep(0.3)
+                                await websocket.send(json.dumps({"get_settings": 1}))
 
                         incoming_settings = data['settings']
 
@@ -1370,6 +1376,10 @@ async def update_limits_from_ws():
                                     if CC2_IP:
                                         heat_cmd["work_mode"] = 2
                                     await panda_ws.send(json.dumps({"settings": heat_cmd}))
+                                    # Poll immediately so device confirms isrunning=1 and
+                                    # heizung flips to ON within ~0.5s instead of ~10s.
+                                    await asyncio.sleep(0.3)
+                                    await panda_ws.send(json.dumps({"get_settings": 1}))
                                 except Exception as e:
                                     log_event(f"[AUTO-ON-ERR] target={int(target)}°C chamber={ist:.1f}°C: {e}", force_console=True)
                                     global_heating_state = RELAY_OFF  # Reset so next cycle retries
