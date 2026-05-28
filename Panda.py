@@ -17,11 +17,13 @@ BASE_DIR = Path(__file__).resolve().parent
 #   der bestehenden Struktur (nur ergänzt/erweitert).
 # ============================================================
 PANDA_VERSION = "v2.0.2"
+RELAY_ON = 85.0   # relay-on sentinel (sent to Panda device as set_temp when heating)
+RELAY_OFF = 20.0  # relay-off sentinel
 last_reported_mode = None
 mode_change_hint = ""
 heating_locked = False
 global_lock = False  # NEU: Sicherheits-Sperre für alle Modi
-global_heating_state = 20.0
+global_heating_state = RELAY_OFF
 last_switch_time = 0
 last_stop_command_time = 0
 last_live_log_state = None
@@ -114,9 +116,9 @@ except Exception:
 # ==========================================
 # current_data nutzt jetzt die exakten Namen aus der Hardware (filament_temp/timer)
 current_data = {
-    "kammer_soll": 0.0,
-    "kammer_ist": 0.0,
-    "bett_limit": 50.0,
+    "chamber_setpoint": 0.0,
+    "chamber_temp": 0.0,
+    "bed_limit": 50.0,
     "filtertemp": 30.0,
     "bed_temp": 0.0,
     "filament_temp": 45,
@@ -140,7 +142,7 @@ current_data = {
     "last_analyzed_file": ""
 }
 
-ha_memory = {"kammer_soll": 30.0, "bett_limit": 50.0}
+ha_memory = {"chamber_setpoint": 30.0, "bed_limit": 50.0}
 last_ha_change = 0
 panda_ws = None
 panda_writer = None  # asyncio StreamWriter from v1.0.3 TLS path
@@ -242,7 +244,7 @@ async def slicer_auto_parser():
                         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_file", filename, retain=True)
 
                         if current_data["slicer_priority_mode"] and new_target > 15:
-                            current_data["kammer_soll"] = new_target
+                            current_data["chamber_setpoint"] = new_target
                             if panda_ws:
                                 asyncio.run_coroutine_threadsafe(
                                     panda_ws.send(json.dumps({"settings": {"set_temp": int(new_target)}})),
@@ -287,7 +289,7 @@ def on_mqtt_message(client, userdata, msg):
                 mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/cc2_print_status", val, retain=True)
                 # Turn off chamber heater when print ends
                 if prev_status in _cc2_printing_states and new_status not in _cc2_printing_states:
-                    current_data["kammer_soll"] = 0.0
+                    current_data["chamber_setpoint"] = 0.0
                     mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", 0, retain=True)
                     # Clear retained active_filament_type so next print doesn't preheat-pause immediately
                     mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/active_filament_type", "", retain=True)
@@ -307,19 +309,19 @@ def on_mqtt_message(client, userdata, msg):
                 # Re-arm heating when print starts — handles retained active_filament_type
                 # arriving before print_status on MQTT reconnect or container restart
                 elif prev_status not in _cc2_printing_states and new_status in _cc2_printing_states:
-                    kammer = float(current_data.get("kammer_soll", 0))
-                    # If kammer_soll not set yet, apply any buffered filament type
+                    kammer = float(current_data.get("chamber_setpoint", 0))
+                    # If chamber_setpoint not set yet, apply any buffered filament type
                     if kammer == 0:
                         pending = current_data.get("cc2_pending_filament", "")
                         if pending:
                             fil_target = FILAMENT_CHAMBER_MAP.get(pending.upper(), FILAMENT_CHAMBER_MAP.get(pending))
                             if fil_target is not None and fil_target > 0:
-                                current_data["kammer_soll"] = float(fil_target)
+                                current_data["chamber_setpoint"] = float(fil_target)
                                 mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(fil_target), retain=True)
                                 kammer = float(fil_target)
                                 log_event(f"[CC2-SLICER] Applied buffered filament {pending} → {kammer:.0f}°C on print start", force_console=True)
                     if kammer > 0 and (panda_ws or panda_writer):
-                        chamber_now = safe_float(current_data.get("kammer_ist", 0), 0)
+                        chamber_now = safe_float(current_data.get("chamber_temp", 0), 0)
                         needs_preheat = chamber_now < (kammer - 5) and not cc2_paused_for_preheat
                         async def _cc2_heat_on_start(t=int(kammer), pause=needs_preheat):
                             global cc2_paused_for_preheat
@@ -342,7 +344,7 @@ def on_mqtt_message(client, userdata, msg):
                             asyncio.run_coroutine_threadsafe(_cc2_heat_on_start(), main_loop)
                         log_event(f"[CC2-SLICER] Print started, re-arming chamber heat to {kammer:.0f}°C", force_console=True)
                     elif kammer > 0:
-                        log_event(f"[CC2-SLICER] Print started, Panda not connected — heat queued at kammer_soll={kammer:.0f}°C, will fire on WS connect", force_console=True)
+                        log_event(f"[CC2-SLICER] Print started, Panda not connected — heat queued at chamber_setpoint={kammer:.0f}°C, will fire on WS connect", force_console=True)
             elif cc2_key == "filename":
                 mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/cc2_filename", val, retain=True)
                 if val:
@@ -373,14 +375,14 @@ def on_mqtt_message(client, userdata, msg):
                 if target is None:
                     log_event(f"[CC2-SLICER] Unknown filament type {val!r}, no chamber target", force_console=True)
                     return
-                current_data["kammer_soll"] = float(target)
+                current_data["chamber_setpoint"] = float(target)
                 current_data["slicer_soll"] = float(target)
                 mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(target), retain=True)
                 mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_soll", int(target), retain=True)
                 mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_target_temp", int(target), retain=True)
                 log_event(f"[CC2-SLICER] {val} → chamber {target}°C", force_console=True)
                 if (panda_ws or panda_writer) and int(target) > 0:
-                    chamber_now = safe_float(current_data.get("kammer_ist", 0), 0)
+                    chamber_now = safe_float(current_data.get("chamber_temp", 0), 0)
                     # Don't re-pause on MQTT reconnect delivering retained active_filament_type
                     needs_preheat = chamber_now < (float(target) - 5) and not cc2_paused_for_preheat
                     async def _cc2_heat(t=int(target), pause=needs_preheat):
@@ -408,9 +410,9 @@ def on_mqtt_message(client, userdata, msg):
                     if main_loop:
                         asyncio.run_coroutine_threadsafe(_cc2_heat(), main_loop)
                     else:
-                        log_event(f"[CC2-SLICER] main_loop not ready — heat queued in kammer_soll={target}°C", force_console=True)
+                        log_event(f"[CC2-SLICER] main_loop not ready — heat queued in chamber_setpoint={target}°C", force_console=True)
                 elif int(target) == 0:
-                    current_data["kammer_soll"] = 0.0
+                    current_data["chamber_setpoint"] = 0.0
                     current_data["slicer_soll"] = 0.0
                     mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", 0, retain=True)
                     mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_soll", 0, retain=True)
@@ -424,7 +426,7 @@ def on_mqtt_message(client, userdata, msg):
                         asyncio.run_coroutine_threadsafe(_cc2_off_no_heat(), main_loop)
                     log_event(f"[CC2-SLICER] {val} needs no chamber heat — heater off", force_console=True)
                 else:
-                    log_event("[CC2-SLICER] Panda not connected, heating queued in kammer_soll", force_console=True)
+                    log_event("[CC2-SLICER] Panda not connected, heating queued in chamber_setpoint", force_console=True)
         except Exception as e:
             log_event(f"[CC2-SLICER] Error processing cc2/{cc2_key}: {e}", force_console=True)
         return
@@ -475,12 +477,12 @@ def on_mqtt_message(client, userdata, msg):
         if is_on:
             slicer_val = float(current_data.get("slicer_soll", 0))
             # In CC2 mode slicer_soll is always 0 (Klipper M191 parser never runs).
-            # Fall back to kammer_soll which CC2 active_filament_type already set.
+            # Fall back to chamber_setpoint which CC2 active_filament_type already set.
             if slicer_val <= 0:
-                slicer_val = float(current_data.get("kammer_soll", 0))
+                slicer_val = float(current_data.get("chamber_setpoint", 0))
 
             if slicer_val > 0:
-                current_data["kammer_soll"] = slicer_val
+                current_data["chamber_setpoint"] = slicer_val
 
             if panda_ws and slicer_val > 0 and not power_forced_off:
                 asyncio.run_coroutine_threadsafe(
@@ -511,9 +513,9 @@ def on_mqtt_message(client, userdata, msg):
 
         else:
             # Slicer mode OFF — restore temperature to last HA-set value
-            restore = float(ha_memory.get("kammer_soll", 0))
+            restore = float(ha_memory.get("chamber_setpoint", 0))
             if restore > 0:
-                current_data["kammer_soll"] = restore
+                current_data["chamber_setpoint"] = restore
                 mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(restore), retain=True)
                 log_event(f"[SLICER] Mode OFF — restored chamber target to {restore:.0f}°C", force_console=True)
 
@@ -528,7 +530,7 @@ def on_mqtt_message(client, userdata, msg):
 
         global_lock = True
         heating_locked = True
-        global_heating_state = 20.0  # 🔥 FIX: Heizung SOFORT logisch ausschalten
+        global_heating_state = RELAY_OFF  # 🔥 FIX: Heizung SOFORT logisch ausschalten
         if cc2_paused_for_preheat:
             cc2_paused_for_preheat = False
             mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/resume_print/press", "", qos=1)
@@ -579,7 +581,7 @@ def on_mqtt_message(client, userdata, msg):
                     "settings": {
                         "work_mode": 2,
                         "work_on": True,
-                        "set_temp": int(current_data.get("kammer_soll", 45)),
+                        "set_temp": int(current_data.get("chamber_setpoint", 45)),
                         "isrunning": 1
                     }
                 }))
@@ -607,7 +609,7 @@ def on_mqtt_message(client, userdata, msg):
                     "settings": {
                         "work_mode": device_mode,
                         "work_on": True,
-                        "set_temp": int(current_data.get("kammer_soll", 30)),
+                        "set_temp": int(current_data.get("chamber_setpoint", 30)),
                         "isrunning": 1
                     },
                     "ui_action": "auto"
@@ -753,15 +755,15 @@ def on_mqtt_message(client, userdata, msg):
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/dry_time", int(val), retain=True)
             return
         if msg.topic.endswith("/soll/set"):
-            key, data_key = "set_temp", "kammer_soll"
+            key, data_key = "set_temp", "chamber_setpoint"
         elif msg.topic.endswith("/limit/set"):
-            key, data_key = "hotbedtemp", "bett_limit"
+            key, data_key = "hotbedtemp", "bed_limit"
         elif msg.topic.endswith("/filtertemp/set"):
             key, data_key = "filtertemp", "filtertemp"
         else: return
-        if data_key == "kammer_soll" and current_data.get("slicer_priority_mode", False):
-            ha_memory["kammer_soll"] = val
-            mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(current_data.get("kammer_soll", 0)), retain=True)
+        if data_key == "chamber_setpoint" and current_data.get("slicer_priority_mode", False):
+            ha_memory["chamber_setpoint"] = val
+            mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(current_data.get("chamber_setpoint", 0)), retain=True)
             return
         current_data[data_key] = val
         mqtt_client.publish(msg.topic.replace("/set", ""), int(val), retain=True)
@@ -775,6 +777,13 @@ def on_mqtt_message(client, userdata, msg):
 
 def setup_mqtt_discovery(client):
     base, dev = MQTT_TOPIC_PREFIX, {"identifiers": [PRINTER_SN], "name": "Panda Breath Mod", "model": "V6.8 Final", "manufacturer": "Biqu"}
+    _number_obj_ids = {
+        "soll":       "panda_chamber_target",
+        "limit":      "panda_bed_limit",
+        "filtertemp": "panda_filter_temp",
+        "dry_temp":   "panda_dry_temp",
+        "dry_time":   "panda_dry_time",
+    }
     for sfx, name, unit, icon, mn, mx in [
         ("soll",       "Chamber Target",       "°C",  "mdi:thermometer",  0,  85),
         ("limit",      "Bed Limit",             "°C",  "mdi:thermometer",  1, 120),
@@ -785,7 +794,7 @@ def setup_mqtt_discovery(client):
         u_id = f"pb_v66_{PRINTER_SN}_{sfx}"
         client.publish(f"homeassistant/number/{u_id}/config", json.dumps({
             "name": name, "state_topic": f"{base}/{sfx}", "command_topic": f"{base}/{sfx}/set",
-            "unique_id": u_id, "device": dev, "min": mn, "max": mx,
+            "unique_id": u_id, "object_id": _number_obj_ids[sfx], "device": dev, "min": mn, "max": mx,
             "unit_of_measurement": unit, "icon": icon, "mode": "box"
         }), retain=True)
 
@@ -795,61 +804,73 @@ def setup_mqtt_discovery(client):
         "command_topic": f"{base}/mode_select/set",
         "options": ["Automatic", "Manual", "Dry", "Standby", "LOCKED"],
         "unique_id": f"{PRINTER_SN}_mode_select",
+        "object_id": "panda_mode",
         "device": dev,
         "icon": "mdi:state-machine"
     }), retain=True)
 
     client.publish(f"homeassistant/sensor/{base}_kammer_ist/config", json.dumps({
-        "name": "Chamber", "state_topic": f"{base}/ist", "unique_id": f"{PRINTER_SN}_kammer_ist", "unit_of_measurement": "°C", "device_class": "temperature", "device": dev
+        "name": "Chamber Temp", "state_topic": f"{base}/ist", "unique_id": f"{PRINTER_SN}_kammer_ist",
+        "object_id": "panda_chamber_temp", "unit_of_measurement": "°C", "device_class": "temperature", "device": dev
     }), retain=True)
 
     client.publish(f"homeassistant/binary_sensor/{base}_heizung/config", json.dumps({
         "name": "Heating Active", "state_topic": f"{base}/heizung", "unique_id": f"{PRINTER_SN}_heizung",
+        "object_id": "panda_heating_active",
         "device": dev, "payload_on": "ON", "payload_off": "OFF", "device_class": "heat", "icon": "mdi:radiator"
     }), retain=True)
 
     client.publish(f"homeassistant/sensor/{base}_status/config", json.dumps({
-        "name": "Panda Heat Status", "state_topic": f"{base}/status", "unique_id": f"pb_v66_{PRINTER_SN}_status", "device": dev, "icon": "mdi:fire-circle"
+        "name": "Panda Heat Status", "state_topic": f"{base}/status", "unique_id": f"pb_v66_{PRINTER_SN}_status",
+        "object_id": "panda_heat_status", "device": dev, "icon": "mdi:fire-circle"
     }), retain=True)
 
     client.publish(f"homeassistant/binary_sensor/{base}_fan/config", json.dumps({
-        "name": "Panda Filter Fan", "state_topic": f"{base}/fan", "unique_id": f"pb_v66_{PRINTER_SN}_fan", "device": dev, "payload_on": "ON", "payload_off": "OFF"
+        "name": "Panda Filter Fan", "state_topic": f"{base}/fan", "unique_id": f"pb_v66_{PRINTER_SN}_fan",
+        "object_id": "panda_filter_fan", "device": dev, "payload_on": "ON", "payload_off": "OFF"
     }), retain=True)
 
     client.publish(f"homeassistant/switch/{base}_panda_power/config", json.dumps({
-        "name": "Panda Power", "state_topic": f"{base}/panda_power", "command_topic": f"{base}/panda_power/set", "unique_id": f"{PRINTER_SN}_panda_power_sw", "device": dev, "payload_on": "ON", "payload_off": "OFF", "icon": "mdi:power"
+        "name": "Panda Power", "state_topic": f"{base}/panda_power", "command_topic": f"{base}/panda_power/set",
+        "unique_id": f"{PRINTER_SN}_panda_power_sw", "object_id": "panda_power",
+        "device": dev, "payload_on": "ON", "payload_off": "OFF", "icon": "mdi:power"
     }), retain=True)
 
     client.publish(f"homeassistant/switch/{base}_slicer_priority_mode/config", json.dumps({
-        "name": "Slicer Priority Mode", "state_topic": f"{base}/slicer_priority_mode", "command_topic": f"{base}/slicer_priority_mode/set", "unique_id": f"{PRINTER_SN}_slicer_priority_mode_sw", "device": dev, "payload_on": "ON", "payload_off": "OFF", "icon": "mdi:priority-high"
+        "name": "Slicer Priority Mode", "state_topic": f"{base}/slicer_priority_mode",
+        "command_topic": f"{base}/slicer_priority_mode/set",
+        "unique_id": f"{PRINTER_SN}_slicer_priority_mode_sw", "object_id": "panda_slicer_priority",
+        "device": dev, "payload_on": "ON", "payload_off": "OFF", "icon": "mdi:priority-high"
     }), retain=True)
 
     client.publish(f"homeassistant/button/{base}_heizung_stop/config", json.dumps({
-        "name": "Heat Stop", "command_topic": f"{base}/heizung_stop/set", "unique_id": f"{PRINTER_SN}_heizung_stop_btn", "device": dev, "icon": "mdi:radiator-off"
+        "name": "Heat Stop", "command_topic": f"{base}/heizung_stop/set",
+        "unique_id": f"{PRINTER_SN}_heizung_stop_btn", "object_id": "panda_heat_stop",
+        "device": dev, "icon": "mdi:radiator-off"
     }), retain=True)
 
     client.publish(f"homeassistant/sensor/{base}_slicer_target_temp/config", json.dumps({
-        "name": "Slicer Target Temp", "state_topic": f"{base}/slicer_target_temp", "unique_id": f"{PRINTER_SN}_slicer_target_temp_sns", "device": dev, "unit_of_measurement": "°C", "device_class": "temperature"
+        "name": "Slicer Target Temp", "state_topic": f"{base}/slicer_target_temp",
+        "unique_id": f"{PRINTER_SN}_slicer_target_temp_sns", "object_id": "panda_slicer_target_temp",
+        "device": dev, "unit_of_measurement": "°C", "device_class": "temperature"
     }), retain=True)
 
     client.publish(f"homeassistant/sensor/{base}_version/config", json.dumps({
-        "name": "Panda Version", "state_topic": f"{base}/version", "unique_id": f"{PRINTER_SN}_panda_version", "device": dev, "icon": "mdi:information-outline"
+        "name": "Panda Version", "state_topic": f"{base}/version",
+        "unique_id": f"{PRINTER_SN}_panda_version", "object_id": "panda_version",
+        "device": dev, "icon": "mdi:information-outline"
     }), retain=True)
 
     client.publish(f"homeassistant/sensor/{base}_lock_status/config", json.dumps({
-        "name": "Panda Lock Status",
-        "state_topic": f"{base}/lock_status",
-        "unique_id": f"{PRINTER_SN}_lock_status",
-        "device": dev,
-        "icon": "mdi:lock"
+        "name": "Panda Lock Status", "state_topic": f"{base}/lock_status",
+        "unique_id": f"{PRINTER_SN}_lock_status", "object_id": "panda_lock_status",
+        "device": dev, "icon": "mdi:lock"
     }), retain=True)
 
     client.publish(f"homeassistant/button/{base}_unlock/config", json.dumps({
-        "name": "Panda Unlock",
-        "command_topic": f"{base}/unlock/set",
-        "unique_id": f"{PRINTER_SN}_unlock_btn",
-        "device": dev,
-        "icon": "mdi:lock-open-variant"
+        "name": "Panda Unlock", "command_topic": f"{base}/unlock/set",
+        "unique_id": f"{PRINTER_SN}_unlock_btn", "object_id": "panda_unlock",
+        "device": dev, "icon": "mdi:lock-open-variant"
     }), retain=True)
 
 
@@ -1028,7 +1049,7 @@ async def update_limits_from_ws():
                                 await asyncio.sleep(0.2)
                             # Re-sync heating state after reconnect — if heater was
                             # supposed to be on before WS dropped, re-send the command.
-                            kammer = float(current_data.get("kammer_soll", 0))
+                            kammer = float(current_data.get("chamber_setpoint", 0))
                             if kammer > 0 and not power_forced_off and not global_lock:
                                 log_event(f"[WS-RECONNECT] Resuming heat to {kammer:.0f}°C after WS reconnect", force_console=True)
                                 await websocket.send(json.dumps({
@@ -1055,7 +1076,7 @@ async def update_limits_from_ws():
 
                         # Ist-Temperatur
                         if 'warehouse_temper' in incoming_settings:
-                            current_data["kammer_ist"] = float(
+                            current_data["chamber_temp"] = float(
                                 incoming_settings['warehouse_temper']
                             )
                             mqtt_client.publish(
@@ -1066,8 +1087,8 @@ async def update_limits_from_ws():
 
                         # Auto-resume CC2 if we paused it waiting for chamber to heat
                         if cc2_paused_for_preheat:
-                            _target = float(current_data.get("kammer_soll", 0))
-                            _ist = float(current_data.get("kammer_ist", 0))
+                            _target = float(current_data.get("chamber_setpoint", 0))
+                            _ist = float(current_data.get("chamber_temp", 0))
                             if _target > 0 and _ist >= (_target - float(HYSTERESE)):
                                 log_event(f"[CC2-SLICER] Chamber at {_ist:.0f}°C, resuming CC2 print", force_console=True)
                                 cc2_paused_for_preheat = False
@@ -1111,7 +1132,7 @@ async def update_limits_from_ws():
 
                             if slicer_active:
                                 if ws_temp > 0:
-                                    current_data["kammer_soll"] = ws_temp
+                                    current_data["chamber_setpoint"] = ws_temp
                                     mqtt_client.publish(
                                         f"{MQTT_TOPIC_PREFIX}/soll",
                                         int(ws_temp),
@@ -1124,7 +1145,7 @@ async def update_limits_from_ws():
                                     and ws_work_mode in (1, 2, 3)
                                     and ws_work_on
                                 ):
-                                    current_data["kammer_soll"] = ws_temp
+                                    current_data["chamber_setpoint"] = ws_temp
                                     mqtt_client.publish(
                                         f"{MQTT_TOPIC_PREFIX}/soll",
                                         int(ws_temp),
@@ -1132,7 +1153,7 @@ async def update_limits_from_ws():
                                     )
 
                         if 'hotbedtemp' in s:
-                            current_data["bett_limit"] = float(s['hotbedtemp'])
+                            current_data["bed_limit"] = float(s['hotbedtemp'])
 
                         if 'filtertemp' in s:
                             current_data["filtertemp"] = float(s['filtertemp'])
@@ -1252,54 +1273,54 @@ async def update_limits_from_ws():
                                 retain=True
                             )
 
-                        target = float(current_data.get("kammer_soll", 0))
-                        ist = float(current_data.get("kammer_ist", 0))
-                        limit = float(current_data.get("bett_limit", 50))
+                        target = float(current_data.get("chamber_setpoint", 0))
+                        ist = float(current_data.get("chamber_temp", 0))
+                        limit = float(current_data.get("bed_limit", 50))
                         bed_ist = float(current_data.get("bed_temp", 0))
                         work_mode_live = int(s.get("work_mode", 0) or 0)
                         work_on_live = s.get("work_on")
                         panda_running = s.get("isrunning") in (1, True, "1")
 
                         if global_lock:
-                            target_state, info = 20.0, "LOCKED"
+                            target_state, info = RELAY_OFF, "LOCKED"
 
                         elif power_forced_off or work_mode_live not in (1, 2, 3):
-                            target_state, info = 20.0, "Standby"
+                            target_state, info = RELAY_OFF, "Standby"
 
                         elif work_mode_live == 3:
                             if ist < (target - HYSTERESE):
-                                target_state, info = 85.0, "Heating..."
+                                target_state, info = RELAY_ON, "Heating..."
                             elif ist >= target:
-                                target_state, info = 20.0, "Hysterese"
+                                target_state, info = RELAY_OFF, "Hysterese"
                             else:
-                                target_state, info = 20.0, "Hysterese"
+                                target_state, info = RELAY_OFF, "Hysterese"
 
                         elif work_mode_live == 1:
                             # CC2 mode: skip bed sensor check — device can't see CC2's Klipper,
                             # so bed_ist stays 0 and the "Done" branch would block heating.
                             if not CC2_IP and bed_ist <= limit:
-                                target_state, info = 20.0, "Done"
+                                target_state, info = RELAY_OFF, "Done"
                             elif ist < (target - HYSTERESE):
-                                target_state, info = 85.0, "Heating..."
+                                target_state, info = RELAY_ON, "Heating..."
                             elif ist >= target:
-                                target_state, info = 20.0, "Hysterese"
+                                target_state, info = RELAY_OFF, "Hysterese"
                             else:
-                                target_state, info = 20.0, "Hysterese"
+                                target_state, info = RELAY_OFF, "Hysterese"
 
                         elif work_mode_live == 2:
                             if ist < (target - HYSTERESE):
-                                target_state, info = 85.0, "Heating..."
+                                target_state, info = RELAY_ON, "Heating..."
                             elif ist >= target:
-                                target_state, info = 20.0, "Hysterese"
+                                target_state, info = RELAY_OFF, "Hysterese"
                             else:
-                                target_state, info = 20.0, "Hysterese"
+                                target_state, info = RELAY_OFF, "Hysterese"
 
                         else:
-                            target_state, info = 20.0, "Standby"
+                            target_state, info = RELAY_OFF, "Standby"
 
                         time_passed = (time.time() - last_switch_time)
 
-                        if target_state == 20.0:
+                        if target_state == RELAY_OFF:
                             now_stop = time.time()
 
                             # V1.0.3 / Klipper bind:
@@ -1308,8 +1329,8 @@ async def update_limits_from_ws():
                             # Darum wird der aktive Lauf mit work_on=False pausiert.
                             # WICHTIG: work_mode und set_temp bleiben unverändert, damit
                             # Kammer-Soll und gewählter Modus NICHT verloren gehen.
-                            if global_heating_state != 20.0:
-                                global_heating_state = 20.0
+                            if global_heating_state != RELAY_OFF:
+                                global_heating_state = RELAY_OFF
                                 last_switch_time = now_stop
 
                             if (panda_running or work_on_live in (1, True, "1")) and (now_stop - last_stop_command_time) >= 2.0:
@@ -1333,7 +1354,7 @@ async def update_limits_from_ws():
                                 current_data.get("slicer_priority_mode", False)
                                 or time_passed > MIN_SWITCH_TIME
                             )
-                        ) or (target_state > 50 and not panda_running):
+                        ) or (target_state == RELAY_ON and not panda_running):
                             if not panda_ws:
                                 log_event(f"[AUTO-ON-WARN] Panda not connected — cannot start heating to {int(target)}°C (chamber={ist:.1f}°C)", force_console=True)
                             else:
@@ -1351,7 +1372,7 @@ async def update_limits_from_ws():
                                     await panda_ws.send(json.dumps({"settings": heat_cmd}))
                                 except Exception as e:
                                     log_event(f"[AUTO-ON-ERR] target={int(target)}°C chamber={ist:.1f}°C: {e}", force_console=True)
-                                    global_heating_state = 20.0  # Reset so next cycle retries
+                                    global_heating_state = RELAY_OFF  # Reset so next cycle retries
 
                         fan_state = "ON" if bed_ist >= float(current_data.get("filtertemp", 30.0)) else "OFF"
                         actual_heating = (panda_running and work_on_live in (1, True, "1"))
@@ -1496,7 +1517,7 @@ async def handle_panda(reader, writer):
 
                     except Exception as ha_err:
                         bed_ist = 0.0
-                        global_heating_state = 20.0
+                        global_heating_state = RELAY_OFF
 
                         if not bed_sensor_error:
                             log_event(f"[BED-SENSOR-ERR] {ha_err}", force_console=True)
@@ -1512,7 +1533,7 @@ async def handle_panda(reader, writer):
                 # ============================================================
                 
                 # 2. Variablen laden
-                target, ist, limit = current_data["kammer_soll"], current_data["kammer_ist"], current_data["bett_limit"]
+                target, ist, limit = current_data["chamber_setpoint"], current_data["chamber_temp"], current_data["bed_limit"]
                 f_threshold = current_data.get("filtertemp", 30.0)
                 work_mode = int(last_ws_settings.get("work_mode", 0) or 0)
                 work_on = last_ws_settings.get("work_on")
@@ -1521,40 +1542,40 @@ async def handle_panda(reader, writer):
                 # ✅ GLOBAL LOCK LOGIK (FIXED & STABILE HYSTERESE)
                 # ------------------------------------------------------------
                 if global_lock:
-                    target_state, info = 20.0, "LOCKED"
-                    global_heating_state = 20.0
+                    target_state, info = RELAY_OFF, "LOCKED"
+                    global_heating_state = RELAY_OFF
 
                 else:
                     if power_forced_off or work_mode not in (1, 2, 3):
-                        target_state, info = 20.0, "Standby"
+                        target_state, info = RELAY_OFF, "Standby"
 
                     elif work_mode == 3:
                         target = float(last_ws_settings.get("custom_temp", current_data.get("filament_temp", target)))
                         remaining = int(last_ws_settings.get("remaining_seconds", 0) or 0)
 
                         if remaining <= 0:
-                            target_state, info = 20.0, "Done"
+                            target_state, info = RELAY_OFF, "Done"
                         elif ist < (target - HYSTERESE):
-                            target_state, info = 85.0, "Heating..."
+                            target_state, info = RELAY_ON, "Heating..."
                         else:
-                            target_state, info = 20.0, "Hysterese"
+                            target_state, info = RELAY_OFF, "Hysterese"
 
                     elif work_mode == 1:
                         if not CC2_IP and bed_ist <= limit:
-                            target_state, info = 20.0, "Done"
+                            target_state, info = RELAY_OFF, "Done"
                         elif ist < (target - HYSTERESE):
-                            target_state, info = 85.0, "Heating..."
+                            target_state, info = RELAY_ON, "Heating..."
                         else:
-                            target_state, info = 20.0, "Hysterese"
+                            target_state, info = RELAY_OFF, "Hysterese"
 
                     elif work_mode == 2:
                         if ist < (target - HYSTERESE):
-                            target_state, info = 85.0, "Heating..."
+                            target_state, info = RELAY_ON, "Heating..."
                         else:
-                            target_state, info = 20.0, "Hysterese"
+                            target_state, info = RELAY_OFF, "Hysterese"
 
                     else:
-                        target_state, info = 20.0, "Standby"
+                        target_state, info = RELAY_OFF, "Standby"
 
                     # ========================================================
                     # ⏱ SWITCH-TIMER LOGIK
@@ -1564,8 +1585,8 @@ async def handle_panda(reader, writer):
                     # In CC2 mode the WS loop (update_limits_from_ws) owns global_heating_state.
                     # TLS emulation loop only reads it for display; never mutates it here.
                     if not CC2_IP:
-                        if target_state == 20.0 and global_heating_state != 20.0:
-                            global_heating_state = 20.0
+                        if target_state == RELAY_OFF and global_heating_state != RELAY_OFF:
+                            global_heating_state = RELAY_OFF
                             last_switch_time = time.time()
 
                         elif (
@@ -1587,7 +1608,7 @@ async def handle_panda(reader, writer):
                 sl = int(current_data.get("slicer_soll", 0))
                 sl_prio = "SL-PRIO" if current_data.get("slicer_priority_mode", False) else "NORMAL"
                 lock_indicator = "⚠️ LOCKED ⚠️" if global_lock else "READY"
-                line = f"\r🟢 {lock_indicator} | Bed:{bed_ist}° | Chamber:{target}/{ist}° | Heat:{'ON' if global_heating_state > 50 else 'OFF'} | Fan:{fan_state} | {info} | {sl_prio}:{sl}°"
+                line = f"\r🟢 {lock_indicator} | Bed:{bed_ist}° | Chamber:{target}/{ist}° | Heat:{'ON' if global_heating_state == RELAY_ON else 'OFF'} | Fan:{fan_state} | {info} | {sl_prio}:{sl}°"
                 
                 mode_change_hint = ""
                 if not terminal_cleared: os.system('clear'); terminal_cleared = True
@@ -1608,8 +1629,8 @@ async def handle_panda(reader, writer):
                         "warehouse_temper": float(ist),
                         "bed_temper": float(bed_ist),
                         "chamber_temper": float(ist),
-                        "bed_target_temper": 100.0 if global_heating_state > 50 else 0.0,
-                        "gcode_state": "RUNNING" if global_heating_state > 50 else "IDLE",
+                        "bed_target_temper": float(int(target)) if global_heating_state == RELAY_ON else 0.0,
+                        "gcode_state": "RUNNING" if global_heating_state == RELAY_ON else "IDLE",
                         "mc_percent": 50
                     }
                 }

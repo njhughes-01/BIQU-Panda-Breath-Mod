@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+- **German variable names removed** — `kammer_soll` → `chamber_setpoint`, `kammer_ist` → `chamber_temp`,
+  `bett_limit` → `bed_limit` throughout `Panda.py`; HA discovery `unique_id` for the chamber-temp
+  sensor (`{PRINTER_SN}_kammer_ist`) intentionally unchanged to avoid orphaning the existing HA entity
+- **Relay sentinel constants** — `RELAY_ON = 85.0` / `RELAY_OFF = 20.0` replace all `> 50` / `== 20.0`
+  / `== 85.0` magic number comparisons in heating logic for clarity
+- **`bed_target_temper` uses actual setpoint** — was hardcoded `100.0` when heating; now sends
+  `float(int(chamber_setpoint))` so the Panda Touch display shows the real target temperature
+- **HA entity `object_id` added** to every MQTT autodiscovery config so entity IDs in HA are clean
+  English names (`panda_chamber_target`, `panda_chamber_temp`, `panda_heating_active`, etc.) instead
+  of auto-generated slugs
+
 ## [2.0.2] - 2026-05-28
 
 ### Fixed
