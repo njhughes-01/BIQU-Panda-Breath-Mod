@@ -946,10 +946,11 @@ def main() -> None:
     poll_thread.start()
     logger.info("Heartbeat and HA poll threads started")
 
-    # Main loop
+    # Main loop — retry_first_connection=True handles startup timing where CC2 MQTT
+    # broker isn't ready yet; prevents the timeout from crashing the process.
     try:
         logger.info("Starting CC2 MQTT loop")
-        cc2_client.loop_forever()
+        cc2_client.loop_forever(retry_first_connection=True)
     except KeyboardInterrupt:
         logger.info("Shutting down...")
         if ha_client:
