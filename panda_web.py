@@ -103,8 +103,14 @@ mqtt_client.on_message = on_message
 
 def start_mqtt():
     mqtt_client.reconnect_delay_set(min_delay=2, max_delay=30)
-    mqtt_client.connect_async(MQTT_BROKER, MQTT_PORT, keepalive=30)
-    mqtt_client.loop_start()
+    while True:
+        try:
+            mqtt_client.connect_async(MQTT_BROKER, MQTT_PORT, keepalive=30)
+            mqtt_client.loop_forever()  # reconnect_delay_set makes this handle reconnects internally
+        except Exception:
+            with state_lock:
+                state["mqtt_connected"] = False
+            time.sleep(5)
 
 
 def publish_command(name, value=None):
@@ -152,6 +158,7 @@ INDEX_HTML = """<!doctype html>
   <header>
     <h1>Panda Breath Control</h1>
     <div style="display:flex;gap:12px;align-items:center">
+      <span id="versionBadge" style="font-size:12px;font-weight:600;padding:3px 8px;border-radius:12px;background:#2a2d33;color:#8a9099">--</span>
       <span id="modeBadge" style="font-size:12px;font-weight:700;padding:3px 10px;border-radius:12px;background:#2a2d33;color:#8a9099;letter-spacing:0.4px">-- Mode</span>
       <button id="helpToggle" style="height:32px;padding:0 12px;font-size:13px" onclick="document.getElementById('helpPanel').classList.toggle('hidden')">? Help</button>
       <div class="status"><span id="mqttDot" class="dot"></span><span id="mqttText">MQTT</span></div>
@@ -268,6 +275,8 @@ INDEX_HTML = """<!doctype html>
         badge.style.background = bmode === 'CC2' ? '#0d2d4a' : '#0d2d1a';
         badge.style.color     = bmode === 'CC2' ? '#58a8f0' : '#4ecb6e';
       }
+      const ver = (data.topics || {}).version;
+      if (ver) document.getElementById('versionBadge').textContent = ver;
       const topics = data.topics || {};
       for (const [key] of tileDefs) document.getElementById(`t_${key}`).textContent = topics[key] ?? '--';
       for (const key of ['soll', 'limit', 'filtertemp', 'dry_temp', 'dry_time']) {
@@ -362,7 +371,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    start_mqtt()
+    threading.Thread(target=start_mqtt, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", WEB_PORT), Handler)
     print(f"Panda web control listening on 0.0.0.0:{WEB_PORT}")
     server.serve_forever()
