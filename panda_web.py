@@ -147,6 +147,7 @@ INDEX_HTML = """<!doctype html>
   <header>
     <h1>Panda Breath Control</h1>
     <div style="display:flex;gap:12px;align-items:center">
+      <span id="modeBadge" style="font-size:12px;font-weight:700;padding:3px 10px;border-radius:12px;background:#2a2d33;color:#8a9099;letter-spacing:0.4px">-- Mode</span>
       <button id="helpToggle" style="height:32px;padding:0 12px;font-size:13px" onclick="document.getElementById('helpPanel').classList.toggle('hidden')">? Help</button>
       <div class="status"><span id="mqttDot" class="dot"></span><span id="mqttText">MQTT</span></div>
     </div>
@@ -255,6 +256,13 @@ INDEX_HTML = """<!doctype html>
       const data = await res.json();
       document.getElementById('mqttDot').classList.toggle('on', data.mqtt_connected);
       document.getElementById('mqttText').textContent = data.mqtt_connected ? 'MQTT connected' : 'MQTT disconnected';
+      const bmode = (data.topics || {}).backend_mode;
+      const badge = document.getElementById('modeBadge');
+      if (bmode) {
+        badge.textContent = bmode + ' Mode';
+        badge.style.background = bmode === 'CC2' ? '#0d2d4a' : '#0d2d1a';
+        badge.style.color     = bmode === 'CC2' ? '#58a8f0' : '#4ecb6e';
+      }
       const topics = data.topics || {};
       for (const [key] of tileDefs) document.getElementById(`t_${key}`).textContent = topics[key] ?? '--';
       for (const key of ['soll', 'limit', 'filtertemp', 'dry_temp', 'dry_time']) {
