@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import asyncio, ssl, json, time, requests, websockets, os
+import asyncio, ssl, json, time, requests, websockets, os, threading
 import logging
 import paho.mqtt.client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
@@ -757,8 +757,10 @@ def setup_mqtt():
     client.username_pw_set(MQTT_USER, MQTT_PASS)
     client.on_message = on_mqtt_message
     client.on_connect = _on_mqtt_connect
-    client.connect(MQTT_BROKER, 1883, 60)
-    client.loop_start()
+    client.reconnect_delay_set(min_delay=2, max_delay=30)
+    client.connect_async(MQTT_BROKER, 1883, keepalive=120)
+    mqtt_thread = threading.Thread(target=client.loop_forever, daemon=True, name="panda-mqtt-loop")
+    mqtt_thread.start()
     return client
 
 mqtt_client = setup_mqtt()
