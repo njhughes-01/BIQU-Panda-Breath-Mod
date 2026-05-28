@@ -102,14 +102,9 @@ mqtt_client.on_message = on_message
 
 
 def start_mqtt():
-    while True:
-        try:
-            mqtt_client.connect_async(MQTT_BROKER, MQTT_PORT, keepalive=60)
-            mqtt_client.loop_forever(retry_first_connection=True)
-        except Exception:
-            with state_lock:
-                state["mqtt_connected"] = False
-            time.sleep(5)
+    mqtt_client.reconnect_delay_set(min_delay=2, max_delay=30)
+    mqtt_client.connect_async(MQTT_BROKER, MQTT_PORT, keepalive=30)
+    mqtt_client.loop_start()
 
 
 def publish_command(name, value=None):
@@ -367,7 +362,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    threading.Thread(target=start_mqtt, daemon=True).start()
+    start_mqtt()
     server = ThreadingHTTPServer(("0.0.0.0", WEB_PORT), Handler)
     print(f"Panda web control listening on 0.0.0.0:{WEB_PORT}")
     server.serve_forever()
