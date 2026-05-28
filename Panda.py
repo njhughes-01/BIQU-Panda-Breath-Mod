@@ -782,101 +782,93 @@ def on_mqtt_message(client, userdata, msg):
         log_event(f"[TEMP-SET-ERR] {e}", force_console=True)
 
 def setup_mqtt_discovery(client):
-    base, dev = MQTT_TOPIC_PREFIX, {"identifiers": [PRINTER_SN], "name": "Panda Breath Mod", "model": "V6.8 Final", "manufacturer": "Biqu"}
-    _number_obj_ids = {
-        "soll":       "panda_chamber_target",
-        "limit":      "panda_bed_limit",
-        "filtertemp": "panda_filter_temp",
-        "dry_temp":   "panda_dry_temp",
-        "dry_time":   "panda_dry_time",
-    }
-    for sfx, name, unit, icon, mn, mx in [
-        ("soll",       "Chamber Target",       "°C",  "mdi:thermometer",  0,  85),
-        ("limit",      "Bed Limit",             "°C",  "mdi:thermometer",  1, 120),
-        ("filtertemp", "Filter Fan Activation", "°C",  "mdi:fan-clock",    1, 120),
-        ("dry_temp",   "Drying Temp",           "°C",  "mdi:thermometer",  1,  80),
-        ("dry_time",   "Drying Time",           "min", "mdi:timer-outline", 1, 480),
+    base = MQTT_TOPIC_PREFIX
+    dev = {"identifiers": [PRINTER_SN], "name": "Panda Breath Mod", "model": "V6.8 Final", "manufacturer": "Biqu"}
+    sn = PRINTER_SN
+
+    # Numbers
+    for sfx, name, obj, unit, icon, mn, mx in [
+        ("soll",       "Chamber Target",       "panda_chamber_target", "°C",  "mdi:thermometer",   0,   85),
+        ("limit",      "Bed Limit",             "panda_bed_limit",      "°C",  "mdi:thermometer",   1,  120),
+        ("filtertemp", "Filter Fan Activation", "panda_filter_temp",    "°C",  "mdi:fan-clock",     1,  120),
+        ("dry_temp",   "Drying Temp",           "panda_dry_temp",       "°C",  "mdi:thermometer",   1,   80),
+        ("dry_time",   "Drying Time",           "panda_dry_time",       "min", "mdi:timer-outline", 1,  480),
     ]:
-        u_id = f"pb_v66_{PRINTER_SN}_{sfx}"
-        client.publish(f"homeassistant/number/{u_id}/config", json.dumps({
-            "name": name, "state_topic": f"{base}/{sfx}", "command_topic": f"{base}/{sfx}/set",
-            "unique_id": u_id, "object_id": _number_obj_ids[sfx], "device": dev, "min": mn, "max": mx,
-            "unit_of_measurement": unit, "icon": icon, "mode": "box"
+        client.publish(f"homeassistant/number/{base}_{obj}/config", json.dumps({
+            "name": name, "unique_id": f"{sn}_{obj}", "object_id": obj,
+            "state_topic": f"{base}/{sfx}", "command_topic": f"{base}/{sfx}/set",
+            "device": dev, "min": mn, "max": mx, "unit_of_measurement": unit, "icon": icon, "mode": "box"
         }), retain=True)
 
-    client.publish(f"homeassistant/select/{base}_mode_select/config", json.dumps({
-        "name": "Panda Mode",
-        "state_topic": f"{base}/panda_modus",
-        "command_topic": f"{base}/mode_select/set",
+    # Select — mode
+    client.publish(f"homeassistant/select/{base}_mode/config", json.dumps({
+        "name": "Panda Mode", "unique_id": f"{sn}_mode", "object_id": "panda_mode",
+        "state_topic": f"{base}/panda_modus", "command_topic": f"{base}/mode_select/set",
         "options": ["Automatic", "Manual", "Dry", "Standby", "LOCKED"],
-        "unique_id": f"{PRINTER_SN}_mode_select",
-        "object_id": "panda_mode",
-        "device": dev,
-        "icon": "mdi:state-machine"
+        "device": dev, "icon": "mdi:state-machine"
     }), retain=True)
 
-    client.publish(f"homeassistant/sensor/{base}_kammer_ist/config", json.dumps({
-        "name": "Chamber Temp", "state_topic": f"{base}/ist", "unique_id": f"{PRINTER_SN}_kammer_ist",
-        "object_id": "panda_chamber_temp", "unit_of_measurement": "°C", "device_class": "temperature", "device": dev
+    # Sensors
+    client.publish(f"homeassistant/sensor/{base}_chamber_temp/config", json.dumps({
+        "name": "Chamber Temp", "unique_id": f"{sn}_chamber_temp", "object_id": "panda_chamber_temp",
+        "state_topic": f"{base}/ist", "unit_of_measurement": "°C", "device_class": "temperature", "device": dev
     }), retain=True)
 
-    client.publish(f"homeassistant/binary_sensor/{base}_heizung/config", json.dumps({
-        "name": "Heating Active", "state_topic": f"{base}/heating", "unique_id": f"{PRINTER_SN}_heizung",
-        "object_id": "panda_heating_active",
-        "device": dev, "payload_on": "ON", "payload_off": "OFF", "device_class": "heat", "icon": "mdi:radiator"
+    client.publish(f"homeassistant/sensor/{base}_heat_status/config", json.dumps({
+        "name": "Heat Status", "unique_id": f"{sn}_heat_status", "object_id": "panda_heat_status",
+        "state_topic": f"{base}/status", "device": dev, "icon": "mdi:fire-circle"
     }), retain=True)
 
-    client.publish(f"homeassistant/sensor/{base}_status/config", json.dumps({
-        "name": "Panda Heat Status", "state_topic": f"{base}/status", "unique_id": f"pb_v66_{PRINTER_SN}_status",
-        "object_id": "panda_heat_status", "device": dev, "icon": "mdi:fire-circle"
-    }), retain=True)
-
-    client.publish(f"homeassistant/binary_sensor/{base}_fan/config", json.dumps({
-        "name": "Panda Filter Fan", "state_topic": f"{base}/fan", "unique_id": f"pb_v66_{PRINTER_SN}_fan",
-        "object_id": "panda_filter_fan", "device": dev, "payload_on": "ON", "payload_off": "OFF"
-    }), retain=True)
-
-    client.publish(f"homeassistant/switch/{base}_panda_power/config", json.dumps({
-        "name": "Panda Power", "state_topic": f"{base}/panda_power", "command_topic": f"{base}/panda_power/set",
-        "unique_id": f"{PRINTER_SN}_panda_power_sw", "object_id": "panda_power",
-        "device": dev, "payload_on": "ON", "payload_off": "OFF", "icon": "mdi:power"
-    }), retain=True)
-
-    client.publish(f"homeassistant/switch/{base}_slicer_priority_mode/config", json.dumps({
-        "name": "Slicer Priority Mode", "state_topic": f"{base}/slicer_priority_mode",
-        "command_topic": f"{base}/slicer_priority_mode/set",
-        "unique_id": f"{PRINTER_SN}_slicer_priority_mode_sw", "object_id": "panda_slicer_priority",
-        "device": dev, "payload_on": "ON", "payload_off": "OFF", "icon": "mdi:priority-high"
-    }), retain=True)
-
-    client.publish(f"homeassistant/button/{base}_heizung_stop/config", json.dumps({
-        "name": "Heat Stop", "command_topic": f"{base}/heat_stop/set",
-        "unique_id": f"{PRINTER_SN}_heizung_stop_btn", "object_id": "panda_heat_stop",
-        "device": dev, "icon": "mdi:radiator-off"
-    }), retain=True)
-
-    client.publish(f"homeassistant/sensor/{base}_slicer_target_temp/config", json.dumps({
-        "name": "Slicer Target Temp", "state_topic": f"{base}/slicer_target_temp",
-        "unique_id": f"{PRINTER_SN}_slicer_target_temp_sns", "object_id": "panda_slicer_target_temp",
-        "device": dev, "unit_of_measurement": "°C", "device_class": "temperature"
+    client.publish(f"homeassistant/sensor/{base}_slicer_target/config", json.dumps({
+        "name": "Slicer Target Temp", "unique_id": f"{sn}_slicer_target", "object_id": "panda_slicer_target",
+        "state_topic": f"{base}/slicer_target_temp", "unit_of_measurement": "°C",
+        "device_class": "temperature", "device": dev
     }), retain=True)
 
     client.publish(f"homeassistant/sensor/{base}_version/config", json.dumps({
-        "name": "Panda Version", "state_topic": f"{base}/version",
-        "unique_id": f"{PRINTER_SN}_panda_version", "object_id": "panda_version",
-        "device": dev, "icon": "mdi:information-outline"
+        "name": "Panda Version", "unique_id": f"{sn}_version", "object_id": "panda_version",
+        "state_topic": f"{base}/version", "device": dev, "icon": "mdi:information-outline"
     }), retain=True)
 
     client.publish(f"homeassistant/sensor/{base}_lock_status/config", json.dumps({
-        "name": "Panda Lock Status", "state_topic": f"{base}/lock_status",
-        "unique_id": f"{PRINTER_SN}_lock_status", "object_id": "panda_lock_status",
-        "device": dev, "icon": "mdi:lock"
+        "name": "Lock Status", "unique_id": f"{sn}_lock_status", "object_id": "panda_lock_status",
+        "state_topic": f"{base}/lock_status", "device": dev, "icon": "mdi:lock"
+    }), retain=True)
+
+    # Binary sensors
+    client.publish(f"homeassistant/binary_sensor/{base}_heating_active/config", json.dumps({
+        "name": "Heating Active", "unique_id": f"{sn}_heating_active", "object_id": "panda_heating_active",
+        "state_topic": f"{base}/heating", "payload_on": "ON", "payload_off": "OFF",
+        "device_class": "heat", "device": dev, "icon": "mdi:radiator"
+    }), retain=True)
+
+    client.publish(f"homeassistant/binary_sensor/{base}_filter_fan/config", json.dumps({
+        "name": "Filter Fan", "unique_id": f"{sn}_filter_fan", "object_id": "panda_filter_fan",
+        "state_topic": f"{base}/fan", "payload_on": "ON", "payload_off": "OFF", "device": dev
+    }), retain=True)
+
+    # Switches
+    client.publish(f"homeassistant/switch/{base}_power/config", json.dumps({
+        "name": "Panda Power", "unique_id": f"{sn}_power", "object_id": "panda_power",
+        "state_topic": f"{base}/panda_power", "command_topic": f"{base}/panda_power/set",
+        "payload_on": "ON", "payload_off": "OFF", "device": dev, "icon": "mdi:power"
+    }), retain=True)
+
+    client.publish(f"homeassistant/switch/{base}_slicer_priority/config", json.dumps({
+        "name": "Slicer Priority Mode", "unique_id": f"{sn}_slicer_priority", "object_id": "panda_slicer_priority",
+        "state_topic": f"{base}/slicer_priority_mode", "command_topic": f"{base}/slicer_priority_mode/set",
+        "payload_on": "ON", "payload_off": "OFF", "device": dev, "icon": "mdi:priority-high"
+    }), retain=True)
+
+    # Buttons
+    client.publish(f"homeassistant/button/{base}_heat_stop/config", json.dumps({
+        "name": "Heat Stop", "unique_id": f"{sn}_heat_stop", "object_id": "panda_heat_stop",
+        "command_topic": f"{base}/heat_stop/set", "device": dev, "icon": "mdi:radiator-off"
     }), retain=True)
 
     client.publish(f"homeassistant/button/{base}_unlock/config", json.dumps({
-        "name": "Panda Unlock", "command_topic": f"{base}/unlock/set",
-        "unique_id": f"{PRINTER_SN}_unlock_btn", "object_id": "panda_unlock",
-        "device": dev, "icon": "mdi:lock-open-variant"
+        "name": "Unlock", "unique_id": f"{sn}_unlock", "object_id": "panda_unlock",
+        "command_topic": f"{base}/unlock/set", "device": dev, "icon": "mdi:lock-open-variant"
     }), retain=True)
 
 
