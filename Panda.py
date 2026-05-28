@@ -386,11 +386,15 @@ def on_mqtt_message(client, userdata, msg):
 
         if is_on:
             slicer_val = float(current_data.get("slicer_soll", 0))
+            # In CC2 mode slicer_soll is always 0 (Klipper M191 parser never runs).
+            # Fall back to kammer_soll which CC2 active_filament_type already set.
+            if slicer_val <= 0:
+                slicer_val = float(current_data.get("kammer_soll", 0))
 
-            if slicer_val > 15:
+            if slicer_val > 0:
                 current_data["kammer_soll"] = slicer_val
 
-            if panda_ws:
+            if panda_ws and slicer_val > 0:
                 asyncio.run_coroutine_threadsafe(
                     panda_ws.send(json.dumps({
                         "settings": {
@@ -412,6 +416,8 @@ def on_mqtt_message(client, userdata, msg):
                     f"[SLICER] Chamber target set to {slicer_val}°",
                     force_console=True
                 )
+            elif not slicer_val:
+                log_event("[SLICER] Mode ON — waiting for CC2 filament detection to set target", force_console=True)
 
         return
 
@@ -481,7 +487,10 @@ def on_mqtt_message(client, userdata, msg):
         power_forced_off = False
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/panda_modus", "Automatic", retain=True)
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/panda_power", "ON", retain=True)
-        current_data["slicer_priority_mode"] = False
+        # Do NOT clear slicer_priority_mode — CC2 slicer sets targets independently.
+        # In CC2 mode the Panda Breath device can't reach the CC2's Klipper for its
+        # bed-temp-based AUTO logic, so always use Manual (work_mode=2) there.
+        device_mode = 2 if CC2_IP else 1
 
         async def flow():
             if panda_ws:
@@ -489,7 +498,7 @@ def on_mqtt_message(client, userdata, msg):
                 await asyncio.sleep(0.1)
                 await panda_ws.send(json.dumps({
                     "settings": {
-                        "work_mode": 1,
+                        "work_mode": device_mode,
                         "work_on": True,
                         "set_temp": int(current_data.get("kammer_soll", 30)),
                         "isrunning": 1
