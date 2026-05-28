@@ -839,14 +839,28 @@ def ha_on_disconnect(client: Client, userdata: Any, disconnect_flags: Any, rc: i
 
 
 def heartbeat_thread() -> None:
-    """Send PING heartbeat to CC2 every 10 seconds."""
+    """Send PING to CC2 every 10s; publish HA status every 20s to prevent MQTT keepalive timeout.
+
+    cc2_backend only publishes to HA when values change. When the printer is idle all
+    sensor values are static, so no MQTT data flows to HA for >30s. paho-mqtt then sends
+    PINGREQ and if PINGRESP doesn't arrive in time it disconnects ("Keep alive timeout").
+    Publishing status every 20s resets paho's _last_msg_out timer and prevents PINGREQ
+    from firing at all.
+    """
+    ha_tick = 0
     while True:
         try:
             time.sleep(10)
             if cc2_client and cc2_client.is_connected():
                 payload = json.dumps({"type": "PING"})
                 cc2_client.publish(f"elegoo/{CC2_SN}/{client_id}/api_request", payload, qos=1)
-                logger.debug("Sent PING heartbeat")
+                logger.debug("Sent CC2 PING heartbeat")
+            ha_tick += 1
+            if ha_tick >= 2:  # every 20s
+                ha_tick = 0
+                if ha_client and ha_client.is_connected():
+                    ha_client.publish(f"{CC2_TOPIC_PREFIX}/status", "online", qos=1, retain=True)
+                    logger.debug("Sent HA heartbeat (status=online)")
         except Exception as e:
             logger.error(f"Heartbeat thread error: {e}")
 
@@ -894,7 +908,7 @@ def main() -> None:
 
         try:
             logger.info(f"Connecting to HA MQTT broker at {HA_MQTT_BROKER}:{HA_MQTT_PORT}")
-            ha_client.connect_async(HA_MQTT_BROKER, HA_MQTT_PORT, keepalive=30)
+            ha_client.connect_async(HA_MQTT_BROKER, HA_MQTT_PORT, keepalive=120)
             ha_thread = threading.Thread(target=ha_client.loop_forever, daemon=True, name="ha-mqtt-loop")
             ha_thread.start()
         except Exception as e:
