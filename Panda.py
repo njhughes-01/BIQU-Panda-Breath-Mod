@@ -451,7 +451,7 @@ def on_mqtt_message(client, userdata, msg):
     # --- MODE SELECT (HA dropdown → route to existing handlers) ---
     if msg.topic == f"{MQTT_TOPIC_PREFIX}/mode_select/set":
         mode_map = {"Automatic": "auto", "Manual": "manual", "Dry": "drying"}
-        target = mode_map.get(payload_str)
+        target = mode_map.get(msg.payload.decode().strip())
         if target:
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/{target}/set", "", retain=False)
         return
@@ -650,12 +650,12 @@ def on_mqtt_message(client, userdata, msg):
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(current_data.get("kammer_soll", 0)), retain=True)
             return
         current_data[data_key] = val
+        mqtt_client.publish(msg.topic.replace("/set", ""), int(val), retain=True)
         if panda_ws:
             asyncio.run_coroutine_threadsafe(
                 panda_ws.send(json.dumps({"settings": {key: int(val)}})),
                 main_loop
             )
-        mqtt_client.publish(msg.topic.replace("/set", ""), int(val), retain=True)
     except Exception as e:
         log_event(f"[TEMP-SET-ERR] {e}", force_console=True)
 
