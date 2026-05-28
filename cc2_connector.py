@@ -196,11 +196,14 @@ def publish_active_filament(tray_id: int) -> None:
 
     filament_type = ""
 
-    # 1. Try by active_tray_id index
-    if 0 <= tray_id < len(trays):
-        tray = trays[tray_id]
+    # 1. Match active_tray_id against each tray's own tray_id field (not list index).
+    # The CC2 reports active_tray_id as the tray's slot number, not its position in the list.
+    tray = next((t for t in trays if t.get("tray_id") == tray_id), None) if tray_id >= 0 else None
+    if tray:
         filament_type = (tray.get("filament_type") or tray.get("material") or
                          tray.get("type") or tray.get("filament") or "")
+    elif tray_id >= 0 and trays:
+        logger.warning(f"active_tray_id={tray_id} not found by tray_id field — have: {[t.get('tray_id') for t in trays]}")
 
     # 2. Filename-based detection — more reliable than tray scan when active_tray_id is unknown
     if not filament_type:
@@ -666,9 +669,14 @@ def cc2_on_message(client: Client, userdata: Any, msg: Any) -> None:
                     canvas = result.get("canvas_info", {})
                     with _cc2_state_lock:
                         _canvas_info.update(canvas)
+                        current_print_state = _last_print_state
                     active_tray = canvas.get("active_tray_id", -1)
-                    publish_active_filament(active_tray)
-                    logger.info(f"Canvas info updated, active_tray_id={active_tray}")
+                    logger.info(f"Canvas info updated, active_tray_id={active_tray}, print_state={current_print_state!r}")
+                    _printing_states = {"printing", "preheating", "paused", "pausing", "resuming", "stopping"}
+                    if current_print_state in _printing_states:
+                        publish_active_filament(active_tray)
+                    else:
+                        logger.info("Canvas received but not printing — deferring filament selection until print starts")
                 return
 
             elif method == 1044:
