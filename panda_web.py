@@ -72,6 +72,7 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
     with state_lock:
         state["mqtt_connected"] = False
+        state["topics"].clear()
     print(f"[MQTT] Disconnected — rc={reason_code}", flush=True)
 
 
