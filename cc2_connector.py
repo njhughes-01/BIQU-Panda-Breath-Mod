@@ -48,6 +48,10 @@ client_id: str = ""
 request_id: str = ""
 _request_counter: int = 100
 
+# Track whether autodiscovery has been published — retained messages persist on the broker
+# so we only need to publish once at startup, not on every reconnect.
+_autodiscovery_published: bool = False
+
 # State cache for publish_to_ha — only publish changed values
 _last_published: Dict[str, str] = {}
 
@@ -773,6 +777,14 @@ def ha_on_message(client: Client, userdata: Any, msg: Any) -> None:
     except Exception:
         return
 
+    # HA birth message — republish autodiscovery when HA restarts
+    if topic == "homeassistant/status" and payload == "online":
+        logger.info("HA restarted (birth message received) — republishing autodiscovery")
+        publish_ha_autodiscovery()
+        _last_published.clear()
+        publish_to_ha()
+        return
+
     if topic == f"{CC2_TOPIC_PREFIX}/pause_print/press":
         logger.info("HA: pause print")
         send_cc2_command(1021)
@@ -833,16 +845,28 @@ def _set_tcp_keepalive(client: Client) -> None:
 
 def ha_on_connect(client: Client, userdata: Any, connect_flags: Any, rc: int, properties: Any = None) -> None:
     """Home Assistant MQTT connection callback."""
+    global _autodiscovery_published
     if rc == 0:
         _set_tcp_keepalive(client)
         logger.info("Connected to HA MQTT broker")
         client.publish(f"{CC2_TOPIC_PREFIX}/status", "online", qos=1, retain=True)
-        publish_ha_autodiscovery()
-        # Subscribe to command topics from HA
+
+        # Subscribe to command topics and HA birth message.
+        # With clean_session=False, subscriptions persist — re-subscribing here refreshes them.
         client.subscribe(f"{CC2_TOPIC_PREFIX}/+/set", qos=1)
         client.subscribe(f"{CC2_TOPIC_PREFIX}/+/press", qos=1)
-        logger.info("Subscribed to HA command topics")
-        # Force republish all state so HA gets current values after any reconnect
+        client.subscribe("homeassistant/status", qos=1)  # detect HA restarts
+        logger.info("Subscribed to HA command topics and birth message")
+
+        # Only publish autodiscovery on first connect — retained messages persist on the
+        # broker and do not need to be re-sent on every reconnect. Republishing 25+ retained
+        # QoS=1 messages on each reconnect was causing Mosquitto to disconnect the client.
+        if not _autodiscovery_published:
+            publish_ha_autodiscovery()
+            _autodiscovery_published = True
+            logger.info("Published HA autodiscovery (first connect)")
+
+        # Republish all current state so HA reflects latest values after any reconnect
         _last_published.clear()
         publish_to_ha()
     else:
@@ -923,8 +947,10 @@ def main() -> None:
     if HA_MQTT_BROKER:
         ha_client = Client(
             callback_api_version=CallbackAPIVersion.VERSION2,
-            client_id=f"cc2_ha_{client_id}",
-            clean_session=True
+            # Stable client_id required for clean_session=False persistent sessions.
+            # Using CC2_SN so the broker always recognises this as the same device.
+            client_id=f"cc2_bridge_{CC2_SN}",
+            clean_session=False  # persistent session: broker retains subscriptions between reconnects
         )
         if HA_MQTT_USER:
             ha_client.username_pw_set(HA_MQTT_USER, HA_MQTT_PASS)
@@ -937,7 +963,8 @@ def main() -> None:
         try:
             logger.info(f"Connecting to HA MQTT broker at {HA_MQTT_BROKER}:{HA_MQTT_PORT}")
             ha_client.connect_async(HA_MQTT_BROKER, HA_MQTT_PORT, keepalive=30)
-            ha_client.loop_start()  # paho-managed thread; more reliable PINGREQ than manual thread
+            ha_thread = threading.Thread(target=ha_client.loop_forever, daemon=True, name="ha-mqtt-loop")
+            ha_thread.start()
         except Exception as e:
             logger.error(f"Failed to initialize HA MQTT client: {e}")
             ha_client = None
