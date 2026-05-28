@@ -292,7 +292,10 @@ def on_mqtt_message(client, userdata, msg):
                     if cc2_paused_for_preheat:
                         cc2_paused_for_preheat = False
                     async def _cc2_off():
-                        await panda_send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "set_temp": 0}}))
+                        try:
+                            await panda_send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "set_temp": 0}}))
+                        except Exception as e:
+                            log_event(f"[CC2-OFF-ERR] Failed to turn off heater at print end: {e}", force_console=True)
                     asyncio.run_coroutine_threadsafe(_cc2_off(), main_loop)
             elif cc2_key in (
                 "nozzle_temp", "print_progress",
@@ -323,16 +326,20 @@ def on_mqtt_message(client, userdata, msg):
                     needs_preheat = chamber_now < (float(target) - 5) and not cc2_paused_for_preheat
                     async def _cc2_heat(t=int(target), pause=needs_preheat):
                         global cc2_paused_for_preheat
-                        await panda_send(json.dumps({"settings": {"isrunning": 0}}))
-                        await asyncio.sleep(0.2)
-                        await panda_send(json.dumps({
-                            "settings": {
-                                "work_mode": 2,
-                                "work_on": True,
-                                "set_temp": t,
-                                "isrunning": 1
-                            }
-                        }))
+                        try:
+                            await panda_send(json.dumps({"settings": {"isrunning": 0}}))
+                            await asyncio.sleep(0.2)
+                            await panda_send(json.dumps({
+                                "settings": {
+                                    "work_mode": 2,
+                                    "work_on": True,
+                                    "set_temp": t,
+                                    "isrunning": 1
+                                }
+                            }))
+                        except Exception as e:
+                            log_event(f"[CC2-HEAT-ERR] Failed to send heat command (target={t}°C): {e}", force_console=True)
+                            return
                         if pause:
                             log_event(f"[CC2-SLICER] Chamber cold ({chamber_now:.0f}°C), pausing CC2 until {t}°C reached", force_console=True)
                             await asyncio.sleep(1.5)
@@ -418,7 +425,9 @@ def on_mqtt_message(client, userdata, msg):
                     f"[SLICER] Chamber target set to {slicer_val}°",
                     force_console=True
                 )
-            elif not slicer_val:
+            elif slicer_val > 0:
+                log_event(f"[SLICER-WARN] Panda not connected — target {slicer_val}°C queued, will send when WS reconnects", force_console=True)
+            else:
                 log_event("[SLICER] Mode ON — waiting for CC2 filament detection to set target", force_console=True)
 
         return
@@ -436,8 +445,12 @@ def on_mqtt_message(client, userdata, msg):
 
         async def stop_flow():
             if panda_ws:
-                # Wir schalten ALLES am Panda sofort aus
-                await panda_ws.send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "work_mode": 0, "set_temp": 0}}))
+                try:
+                    await panda_ws.send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "work_mode": 0, "set_temp": 0}}))
+                except Exception as e:
+                    log_event(f"[EMERGENCY-STOP-ERR] WS send failed: {e} — physical heater may still run!", force_console=True)
+            else:
+                log_event("[EMERGENCY-STOP-WARN] Panda not connected — physical heater may still run!", force_console=True)
         
         asyncio.run_coroutine_threadsafe(stop_flow(), main_loop)
 
@@ -548,10 +561,15 @@ def on_mqtt_message(client, userdata, msg):
         is_on = payload in ("on", "1", "true")
         async def p_flow():
             if panda_ws:
-                if not is_on:
-                    await panda_ws.send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "work_mode": 0}}))
-                else:
-                    await panda_ws.send(json.dumps({"settings": {"work_on": 1, "isrunning": 1}}))
+                try:
+                    if not is_on:
+                        await panda_ws.send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "work_mode": 0}}))
+                    else:
+                        await panda_ws.send(json.dumps({"settings": {"work_on": 1, "isrunning": 1}}))
+                except Exception as e:
+                    log_event(f"[WORK-ON-ERR] WS send failed ({'ON' if is_on else 'OFF'}): {e}", force_console=True)
+            else:
+                log_event(f"[WORK-ON-WARN] Panda not connected — {'ON' if is_on else 'OFF'} command dropped, MQTT state updated only", force_console=True)
         asyncio.run_coroutine_threadsafe(p_flow(), main_loop)
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/work_on", "1" if is_on else "0", retain=True)
         return
@@ -783,6 +801,8 @@ async def panda_send(payload: str) -> None:
         else:
             panda_writer.write(bytes([0x81, 126, len(data) >> 8, len(data) & 0xFF]) + data)
         await panda_writer.drain()
+    else:
+        log_event(f"[PANDA-DISCONNECTED] No WS connection — command dropped: {payload[:120]}", force_console=True)
 
 
 # --- WS LOOP (OPTIMIERT: Hält Verbindung bei WiFi-Paketen offen) ---
@@ -879,6 +899,18 @@ async def update_limits_from_ws():
                                     "settings": {"work_mode": 2}
                                 }))
                                 log_event("[CC2] Forced work_mode=2 (Manual) on connect", force_console=True)
+                            # Re-sync heating state after reconnect — if heater was
+                            # supposed to be on before WS dropped, re-send the command.
+                            kammer = float(current_data.get("kammer_soll", 0))
+                            if global_heating_state > 50 and kammer > 0 and not power_forced_off and not global_lock:
+                                log_event(f"[WS-RECONNECT] Resuming heat to {kammer:.0f}°C after WS reconnect", force_console=True)
+                                await websocket.send(json.dumps({
+                                    "settings": {
+                                        "work_on": True,
+                                        "set_temp": int(kammer),
+                                        "isrunning": 1
+                                    }
+                                }))
 
                         incoming_settings = data['settings']
 
@@ -1159,8 +1191,10 @@ async def update_limits_from_ws():
                                                 "work_on": False
                                             }
                                         }))
+                                    else:
+                                        log_event(f"[AUTO-OFF-WARN] Panda not connected — cannot stop heating (chamber={ist:.1f}°C)", force_console=True)
                                 except Exception as e:
-                                    log_event(f"[AUTO-OFF-ERR] {e}", force_console=True)
+                                    log_event(f"[AUTO-OFF-ERR] chamber={ist:.1f}°C target={target:.1f}°C: {e}", force_console=True)
 
                         elif (
                             target_state != global_heating_state
@@ -1169,11 +1203,13 @@ async def update_limits_from_ws():
                                 or time_passed > MIN_SWITCH_TIME
                             )
                         ) or (target_state > 50 and not panda_running):
-                            global_heating_state = target_state
-                            last_switch_time = time.time()
-                            last_stop_command_time = 0
-                            try:
-                                if panda_ws:
+                            if not panda_ws:
+                                log_event(f"[AUTO-ON-WARN] Panda not connected — cannot start heating to {int(target)}°C (chamber={ist:.1f}°C)", force_console=True)
+                            else:
+                                global_heating_state = target_state
+                                last_switch_time = time.time()
+                                last_stop_command_time = 0
+                                try:
                                     await panda_ws.send(json.dumps({
                                         "settings": {
                                             "work_on": True,
@@ -1181,8 +1217,9 @@ async def update_limits_from_ws():
                                             "isrunning": 1
                                         }
                                     }))
-                            except Exception as e:
-                                log_event(f"[AUTO-ON-ERR] {e}", force_console=True)
+                                except Exception as e:
+                                    log_event(f"[AUTO-ON-ERR] target={int(target)}°C chamber={ist:.1f}°C: {e}", force_console=True)
+                                    global_heating_state = 20.0  # Reset so next cycle retries
 
                         fan_state = "ON" if bed_ist >= float(current_data.get("filtertemp", 30.0)) else "OFF"
                         actual_heating = (panda_running and work_on_live in (1, True, "1"))
