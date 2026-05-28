@@ -709,6 +709,10 @@ def setup_mqtt_discovery(client):
 
 def _on_mqtt_connect(client, userdata, flags, reason_code, properties):
     if not reason_code.is_failure:
+        # Re-subscribe on every connect/reconnect so subscriptions survive HA MQTT restarts
+        client.subscribe(f"{MQTT_TOPIC_PREFIX}/#")
+        if CC2_IP:
+            client.subscribe(f"{CC2_TOPIC_PREFIX}/#")
         setup_mqtt_discovery(client)
         log_event("[MQTT] HA autodiscovery published", force_console=True)
         # Republish slicer priority state so HA always reflects current value
@@ -722,9 +726,6 @@ def setup_mqtt():
     client.on_message = on_mqtt_message
     client.on_connect = _on_mqtt_connect
     client.connect(MQTT_BROKER, 1883, 60)
-    client.subscribe(f"{MQTT_TOPIC_PREFIX}/#")
-    if CC2_IP:
-        client.subscribe(f"{CC2_TOPIC_PREFIX}/#")
     client.loop_start()
     return client
 
