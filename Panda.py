@@ -89,6 +89,7 @@ HA_TOKEN = CONFIG["HA_TOKEN"]
 PRINTER_IP = CONFIG["PRINTER_IP"]
 CC2_IP = CONFIG.get("CC2_IP", os.environ.get("CC2_IP", ""))
 CC2_TOPIC_PREFIX = CONFIG.get("CC2_TOPIC_PREFIX", os.environ.get("CC2_TOPIC_PREFIX", "cc2"))
+MQTT_PORT = CONFIG.get("MQTT_PORT", int(os.environ.get("HA_MQTT_PORT", 1883)))
 
 # Filament type → chamber target (°C). Override via CC2_FILAMENT_MAP env var (JSON).
 _DEFAULT_FILAMENT_MAP = {
@@ -331,11 +332,12 @@ def on_mqtt_message(client, userdata, msg):
                             except Exception as e:
                                 log_event(f"[CC2-START-HEAT-ERR] {e}", force_console=True)
                                 return
-                            if pause:
+                            if pause and not cc2_paused_for_preheat:
                                 log_event(f"[CC2-SLICER] Chamber cold ({chamber_now:.0f}°C), pausing CC2 until {t}°C reached", force_console=True)
                                 await asyncio.sleep(1.5)
-                                mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/pause_print/press", "", qos=1)
-                                cc2_paused_for_preheat = True
+                                if not cc2_paused_for_preheat:
+                                    mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/pause_print/press", "", qos=1)
+                                    cc2_paused_for_preheat = True
                         asyncio.run_coroutine_threadsafe(_cc2_heat_on_start(), main_loop)
                         log_event(f"[CC2-SLICER] Print started, re-arming chamber heat to {kammer:.0f}°C", force_console=True)
             elif cc2_key == "filename":
@@ -394,11 +396,12 @@ def on_mqtt_message(client, userdata, msg):
                         except Exception as e:
                             log_event(f"[CC2-HEAT-ERR] Failed to send heat command (target={t}°C): {e}", force_console=True)
                             return
-                        if pause:
+                        if pause and not cc2_paused_for_preheat:
                             log_event(f"[CC2-SLICER] Chamber cold ({chamber_now:.0f}°C), pausing CC2 until {t}°C reached", force_console=True)
                             await asyncio.sleep(1.5)
-                            mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/pause_print/press", "", qos=1)
-                            cc2_paused_for_preheat = True
+                            if not cc2_paused_for_preheat:
+                                mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/pause_print/press", "", qos=1)
+                                cc2_paused_for_preheat = True
                     asyncio.run_coroutine_threadsafe(_cc2_heat(), main_loop)
                 elif int(target) == 0:
                     current_data["kammer_soll"] = 0.0
@@ -555,7 +558,8 @@ def on_mqtt_message(client, userdata, msg):
         log_event(">>> MANUELL MODE ENTERED <<<", force_console=True)
         heating_locked = False
         power_forced_off = False
-        
+        current_data["slicer_priority_mode"] = False
+
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/panda_modus", "Manual", retain=True)
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_priority_mode", "OFF", retain=True)
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/panda_power", "ON", retain=True)
@@ -877,7 +881,7 @@ def setup_mqtt():
     client.on_message = on_mqtt_message
     client.on_connect = _on_mqtt_connect
     client.reconnect_delay_set(min_delay=2, max_delay=30)
-    client.connect_async(MQTT_BROKER, 1883, keepalive=30)
+    client.connect_async(MQTT_BROKER, MQTT_PORT, keepalive=30)
     mqtt_thread = threading.Thread(target=client.loop_forever, daemon=True, name="panda-mqtt-loop")
     mqtt_thread.start()
     return client
@@ -1003,7 +1007,7 @@ async def update_limits_from_ws():
                             # Re-sync heating state after reconnect — if heater was
                             # supposed to be on before WS dropped, re-send the command.
                             kammer = float(current_data.get("kammer_soll", 0))
-                            if global_heating_state > 50 and kammer > 0 and not power_forced_off and not global_lock:
+                            if kammer > 0 and not power_forced_off and not global_lock:
                                 log_event(f"[WS-RECONNECT] Resuming heat to {kammer:.0f}°C after WS reconnect", force_console=True)
                                 await websocket.send(json.dumps({
                                     "settings": {
@@ -1043,8 +1047,11 @@ async def update_limits_from_ws():
                             _ist = float(current_data.get("kammer_ist", 0))
                             if _target > 0 and _ist >= (_target - float(HYSTERESE)):
                                 log_event(f"[CC2-SLICER] Chamber at {_ist:.0f}°C, resuming CC2 print", force_console=True)
-                                mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/resume_print/press", "", qos=1)
                                 cc2_paused_for_preheat = False
+                                if current_data.get("cc2_print_status") == "paused":
+                                    mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/resume_print/press", "", qos=1)
+                                else:
+                                    log_event(f"[CC2-SLICER] CC2 not paused (status={current_data.get('cc2_print_status')!r}), skip resume", force_console=True)
 
                         # CC2 mode: bed_temp updated via MQTT subscription
                         # Traditional mode: fetch from HA REST API
@@ -1527,22 +1534,25 @@ async def handle_panda(reader, writer):
                     # ========================================================
                     time_passed = (time.time() - last_switch_time)
 
-                    if target_state == 20.0 and global_heating_state != 20.0:
-                        global_heating_state = 20.0
-                        last_switch_time = time.time()
+                    # In CC2 mode the WS loop (update_limits_from_ws) owns global_heating_state.
+                    # TLS emulation loop only reads it for display; never mutates it here.
+                    if not CC2_IP:
+                        if target_state == 20.0 and global_heating_state != 20.0:
+                            global_heating_state = 20.0
+                            last_switch_time = time.time()
 
-                    elif (
-                        target_state != global_heating_state
-                        and (
-                            current_data.get("slicer_priority_mode", False)
-                            or time_passed > MIN_SWITCH_TIME
-                        )
-                    ):
-                        global_heating_state = target_state
-                        last_switch_time = time.time()
+                        elif (
+                            target_state != global_heating_state
+                            and (
+                                current_data.get("slicer_priority_mode", False)
+                                or time_passed > MIN_SWITCH_TIME
+                            )
+                        ):
+                            global_heating_state = target_state
+                            last_switch_time = time.time()
 
                 # ============================================================
-                
+
                 # 4. Lüfter-Logik (Filter Fan)
                 fan_state = "ON" if bed_ist >= f_threshold else "OFF"
                 

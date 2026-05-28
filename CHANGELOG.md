@@ -5,13 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-## [2.0.0] - 2026-05-27
+## [2.0.0] - 2026-05-28
 
 ### Added
 - Docker/GHCR multi-arch build workflow (`linux/amd64`, `linux/arm64`) — pre-built images
   at `ghcr.io/njhughes-01/biqu-panda-breath-mod`
-- `cc2_connector.py` — Elegoo Centauri Carbon 2 MQTT bridge; publishes 7 HA sensors
-  (nozzle/bed/chamber temps, nozzle/bed targets, print status, progress) via autodiscovery
+- `cc2_connector.py` — Elegoo Centauri Carbon 2 MQTT bridge; publishes sensors via HA
+  autodiscovery (nozzle/bed/chamber temps, targets, print status/progress, fan speed,
+  LED, speed mode, filament detected, file list, active filament type)
 - `panda_web.py` — browser-based control dashboard on port 8088; replaces the upstream
   PySide6 desktop GUI concept with a dependency-free HTTP+MQTT interface
 - `docker-compose.cc2.yml` — Compose override for CC2 users; standard users run only
@@ -22,15 +23,52 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `SETUP.md` — full setup guide with both deployment paths, env var reference tables,
   TLS documentation, and troubleshooting
 - Runtime TLS cert generation via Docker volume (`panda_certs`) — no manual cert setup
+- CC2 filament-to-chamber-temp map (`CC2_FILAMENT_MAP` env var override); automatically
+  selects target from AMS tray, filename, or nozzle temp as fallback
+- Slicer Priority Mode for CC2: detect print start → pause CC2 → heat chamber → auto-resume
+  when chamber reaches target; full filament type → chamber temp mapping
+- Print control buttons in HA: pause, resume, stop, LED toggle, fan speed, speed mode
+- `MQTT_PORT` env var support (`HA_MQTT_PORT`) — was hardcoded 1883
 
 ### Changed
 - `docker-compose.yml` switched from local build to GHCR image pull
 - `docker-entrypoint.sh` config generation refactored to call `generate_config.py`
 - `CC2_IP` env var gates CC2 MQTT subscription and bed-temp source in `Panda.py`;
   standard deployments (no `CC2_IP`) behave identically to upstream
+- CC2 mode always forces `work_mode=2` (Manual) on Panda Breath connect — AUTO mode
+  uses Klipper bed-temp logic which can't reach the CC2's API
+- `panda_backend` in `docker-compose.cc2.yml` now depends on `cc2_backend` being healthy
+  before starting
 
 ### Fixed
 - German HA entity names and log strings translated to English
 - paho-mqtt v2 callback API (`CallbackAPIVersion.VERSION2`, `ReasonCode.is_failure`)
 - `panda_web` button state now reflects live MQTT state (mode/power/slicer buttons)
 - HA REST API bed temp fetch skipped when CC2 MQTT data is available
+- **TCP SO_KEEPALIVE** on both HA MQTT sockets (idle=10s) — prevents NAT/VLAN firewall
+  dropping idle connections and causing "Keep alive timeout" disconnects
+- **TLS emulation loop** no longer resets `global_heating_state` in CC2 mode — the WS
+  loop exclusively owns heating state when CC2_IP is set
+- **WS reconnect heat recovery** — condition was `global_heating_state > 50` (always false
+  after disconnect resets it to 20); now correctly checks `kammer_soll > 0`
+- **Duplicate pause race** — `cc2_paused_for_preheat` re-checked inside heat coroutines
+  both before the 1.5s sleep and after, preventing double-pause on concurrent triggers
+- **Blind resume** — auto-resume at temperature now verifies `cc2_print_status == "paused"`
+  before publishing resume command
+- **Manual mode** — now correctly clears `current_data["slicer_priority_mode"]`; previously
+  only published MQTT `OFF` without updating the in-memory flag
+- **CC2 state machine** — `bind_confirmed` reset to `False` on WS disconnect so `work_mode=2`
+  is re-forced on every reconnect, not just the first
+- **Print-end cleanup** — `active_filament_type` retained message cleared, `cc2_pending_filament`
+  and slicer targets reset so next print starts clean
+- **Retained message race** — `active_filament_type` arriving before `print_status` on
+  container restart buffered in `cc2_pending_filament` and applied on print-start transition
+- **PLA/TPU (target=0)** — explicitly clears `kammer_soll` and sends heater-off; previously
+  heater stayed on from prior ABS/ASA print
+- **Safety overrides** (power-off, emergency stop, unlock) now resume CC2 if it was paused
+  for preheat
+- **Thread safety** in `cc2_connector.py` — `_canvas_info`, `_file_list`, `_last_print_state`,
+  `_last_filament_type` protected with `_cc2_state_lock`; `publish_to_ha` called from both
+  the cc2 and HA MQTT threads
+- **LED optimistic publish** uses `retain=True` so HA switch state survives reconnects
+- **Registration retry** on CC2 MQTT failure retries after 5s instead of silently dropping

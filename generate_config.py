@@ -29,6 +29,7 @@ def generate_config(env=None):
         "PRINTER_IP": env.get("PANDA_IP", ""),
         "CC2_IP": env.get("CC2_IP", ""),
         "CC2_TOPIC_PREFIX": env.get("CC2_TOPIC_PREFIX", "cc2"),
+        "MQTT_PORT": int(env.get("HA_MQTT_PORT", 1883)),
     }
 
 

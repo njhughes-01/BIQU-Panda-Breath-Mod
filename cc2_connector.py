@@ -101,6 +101,9 @@ _SPEED_MODE_NAMES: Dict[int, str] = {
 _file_list: List[str] = []
 # Last published filament type — prevents re-publishing on every publish_to_ha tick
 _last_filament_type: str = ""
+# Lock for all auxiliary shared state (_canvas_info, _file_list, _last_print_state, _last_filament_type)
+# publish_to_ha is called from both the cc2 thread and ha thread; this prevents concurrent mutations.
+_cc2_state_lock = threading.Lock()
 
 
 def generate_client_id() -> str:
@@ -179,11 +182,16 @@ def publish_active_filament(tray_id: int) -> None:
     global _last_filament_type
     if not ha_client or not ha_client.is_connected():
         return
-    canvas = _canvas_info.get("canvas_list", [{}])[0] if _canvas_info else {}
+
+    with _cc2_state_lock:
+        canvas_snap = dict(_canvas_info)
+        last_ft = _last_filament_type
+
+    canvas = canvas_snap.get("canvas_list", [{}])[0] if canvas_snap else {}
     trays = canvas.get("tray_list", [])
 
     # Log raw tray data once so we can see the actual field names the CC2 uses
-    if trays and not _last_filament_type:
+    if trays and not last_ft:
         logger.info(f"[CANVAS DEBUG] raw tray_list[0] keys: {list(trays[0].keys())}, data: {trays[0]}")
 
     filament_type = ""
@@ -218,14 +226,17 @@ def publish_active_filament(tray_id: int) -> None:
         if filament_type:
             logger.info(f"Filament type inferred from nozzle target {nozzle_target}°C: {filament_type}")
 
-    if filament_type and filament_type != _last_filament_type:
-        _last_filament_type = filament_type
-        ha_client.publish(f"{CC2_TOPIC_PREFIX}/active_filament_type", filament_type, qos=1, retain=True)
-        logger.info(f"Active filament: tray {tray_id} = {filament_type}")
+    if filament_type and filament_type != last_ft:
+        with _cc2_state_lock:
+            if filament_type != _last_filament_type:  # re-check under lock
+                _last_filament_type = filament_type
+                ha_client.publish(f"{CC2_TOPIC_PREFIX}/active_filament_type", filament_type, qos=1, retain=True)
+                logger.info(f"Active filament: tray {tray_id} = {filament_type}")
 
 
 def publish_to_ha() -> None:
     """Publish current printer state to Home Assistant MQTT sensors."""
+    global _last_print_state, _last_filament_type, _canvas_info
     if not ha_client or not ha_client.is_connected():
         logger.warning("HA MQTT client not connected, skipping publish")
         return
@@ -274,37 +285,39 @@ def publish_to_ha() -> None:
             print_progress = machine_status_obj.get("progress")
             if print_progress is None:
                 print_progress = print_status_obj.get("progress") or 0
-            active_tray_id = (_canvas_info.get("active_tray_id", -1)
-                              if _canvas_info else -1)
+        with _cc2_state_lock:
+            active_tray_id = (_canvas_info.get("active_tray_id", -1) if _canvas_info else -1)
+            _file_list_snap = list(_file_list)
+            _last_print_state_snap = _last_print_state
 
-            # Extended fields
-            filament_detected = "ON" if extruder.get("filament_detected") else "OFF"
-            remaining_time = int(print_status_obj.get("remaining_time_sec") or 0)
-            current_layer = int(print_status_obj.get("current_layer") or 0)
-            filename = str(print_status_obj.get("filename") or "")
+        # Extended fields
+        filament_detected = "ON" if extruder.get("filament_detected") else "OFF"
+        remaining_time = int(print_status_obj.get("remaining_time_sec") or 0)
+        current_layer = int(print_status_obj.get("current_layer") or 0)
+        filename = str(print_status_obj.get("filename") or "")
 
-            # Prefer gcode_move_inf (CC2 firmware) over gcode_move
-            gcode_move = printer_state.get("gcode_move_inf") or printer_state.get("gcode_move") or {}
-            z_height = round(float(gcode_move.get("z") or 0), 2)
+        # Prefer gcode_move_inf (CC2 firmware) over gcode_move
+        gcode_move = printer_state.get("gcode_move_inf") or printer_state.get("gcode_move") or {}
+        z_height = round(float(gcode_move.get("z") or 0), 2)
 
-            fans_obj = printer_state.get("fans") or {}
-            # CC2 fan speeds are 0-255; normalize to 0-100%
-            raw_fan = float((fans_obj.get("fan") or {}).get("speed") or 0)
-            fan_speed = int(round(raw_fan / 255 * 100)) if raw_fan > 1 else int(round(raw_fan * 100))
-            raw_box = float((fans_obj.get("box_fan") or {}).get("speed") or 0)
-            box_fan_speed = int(round(raw_box / 255 * 100)) if raw_box > 1 else int(round(raw_box * 100))
+        fans_obj = printer_state.get("fans") or {}
+        # CC2 fan speeds are 0-255; normalize to 0-100%
+        raw_fan = float((fans_obj.get("fan") or {}).get("speed") or 0)
+        fan_speed = int(round(raw_fan / 255 * 100)) if raw_fan > 1 else int(round(raw_fan * 100))
+        raw_box = float((fans_obj.get("box_fan") or {}).get("speed") or 0)
+        box_fan_speed = int(round(raw_box / 255 * 100)) if raw_box > 1 else int(round(raw_box * 100))
 
-            led_obj = printer_state.get("led") or {}
-            led_status = "ON" if led_obj.get("status") else "OFF"
+        led_obj = printer_state.get("led") or {}
+        led_status = "ON" if led_obj.get("status") else "OFF"
 
-            exception_status = machine_status_obj.get("exception_status") or []
-            has_error = "ON" if exception_status else "OFF"
+        exception_status = machine_status_obj.get("exception_status") or []
+        has_error = "ON" if exception_status else "OFF"
 
-            speed_mode_code = int(gcode_move.get("speed_mode") or 1)
-            speed_mode = _SPEED_MODE_NAMES.get(speed_mode_code, "Balanced")
+        speed_mode_code = int(gcode_move.get("speed_mode") or 1)
+        speed_mode = _SPEED_MODE_NAMES.get(speed_mode_code, "Balanced")
 
-        file_count = len(_file_list)
-        latest_filename = _file_list[-1] if _file_list else ""
+        file_count = len(_file_list_snap)
+        latest_filename = _file_list_snap[-1] if _file_list_snap else ""
 
         # Convert progress to percentage (0-100)
         if isinstance(print_progress, (int, float)) and 0 <= float(print_progress) <= 1:
@@ -339,15 +352,14 @@ def publish_to_ha() -> None:
                 logger.debug(f"Published {topic} = {payload}")
 
         # Detect print start → request fresh canvas info to get active tray
-        global _last_print_state
         # Include preheating — slicer priority should fire as soon as print job starts
         printing_states = {"printing", "preheating", "paused", "pausing", "resuming", "stopping"}
         current_state = str(print_status).lower()
-        was_printing = _last_print_state in printing_states
+        was_printing = _last_print_state_snap in printing_states
         is_printing = current_state in printing_states
-        if current_state != _last_print_state:
-            logger.info(f"Print state: {_last_print_state!r} → {current_state!r} (machine={machine_code}, sub={machine_code_sub})")
-        if machine_code == 11 and _last_print_state != "file_transferring":
+        if current_state != _last_print_state_snap:
+            logger.info(f"Print state: {_last_print_state_snap!r} → {current_state!r} (machine={machine_code}, sub={machine_code_sub})")
+        if machine_code == 11 and _last_print_state_snap != "file_transferring":
             # File transfer just started — CC2 is loading the job; good time to check active tray
             logger.info("File transfer started, pre-fetching canvas info for tray assignment")
             request_canvas_info()
@@ -356,12 +368,13 @@ def publish_to_ha() -> None:
             request_canvas_info()
         elif not is_printing and was_printing:
             # Print ended — reset so next print re-triggers filament detection
-            global _last_filament_type, _canvas_info
-            _last_filament_type = ""
-            _canvas_info = {}  # Clear stale tray data so next print gets a fresh canvas request
+            with _cc2_state_lock:
+                _last_filament_type = ""
+                _canvas_info = {}  # Clear stale tray data so next print gets a fresh canvas request
         elif is_printing and active_tray_id >= 0:
             publish_active_filament(active_tray_id)
-        _last_print_state = current_state
+        with _cc2_state_lock:
+            _last_print_state = current_state
 
     except Exception as e:
         logger.error(f"Error publishing to HA: {e}")
@@ -648,7 +661,8 @@ def cc2_on_message(client: Client, userdata: Any, msg: Any) -> None:
                 # Canvas info (AMS tray data)
                 if isinstance(result, dict) and result.get("error_code") == 0:
                     canvas = result.get("canvas_info", {})
-                    _canvas_info.update(canvas)
+                    with _cc2_state_lock:
+                        _canvas_info.update(canvas)
                     active_tray = canvas.get("active_tray_id", -1)
                     publish_active_filament(active_tray)
                     logger.info(f"Canvas info updated, active_tray_id={active_tray}")
@@ -667,7 +681,8 @@ def cc2_on_message(client: Client, userdata: Any, msg: Any) -> None:
                         ]
                         if not files:
                             files = [str(f) for f in raw if isinstance(f, str)]
-                _file_list = files
+                with _cc2_state_lock:
+                    _file_list = files
                 logger.info(f"File list updated: {len(_file_list)} files")
                 if _file_list:
                     logger.info(f"Files: {', '.join(_file_list[:10])}")
@@ -757,10 +772,10 @@ def ha_on_message(client: Client, userdata: Any, msg: Any) -> None:
         status = 1 if payload.upper() == "ON" else 0
         logger.info(f"HA: LED → {'ON' if status else 'OFF'}")
         send_cc2_command(1029, {"status": status})
-        # Optimistically update state so HA switch reflects immediately
+        # Optimistically update state so HA switch reflects immediately and survives reconnect
         val = "ON" if status else "OFF"
         if ha_client and ha_client.is_connected():
-            ha_client.publish(f"{CC2_TOPIC_PREFIX}/led", val, retain=False)
+            ha_client.publish(f"{CC2_TOPIC_PREFIX}/led", val, retain=True)
 
     elif topic == f"{CC2_TOPIC_PREFIX}/fan_speed_control/set":
         try:

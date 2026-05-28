@@ -24,6 +24,9 @@ services:
     image: ghcr.io/njhughes-01/biqu-panda-breath-mod:latest
     command: python3 Panda.py
     restart: unless-stopped
+    depends_on:
+      cc2_backend:
+        condition: service_healthy
     networks:
       IOT:
         ipv4_address: ${PANDA_BACKEND_IP:-}
