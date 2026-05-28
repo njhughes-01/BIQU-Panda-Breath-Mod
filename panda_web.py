@@ -246,7 +246,7 @@ INDEX_HTML = """<!doctype html>
       ['status', 'Status'], ['bed', 'Bed'], ['ist', 'Chamber'], ['heating', 'Heat'],
       ['fan', 'Fan'], ['panda_modus', 'Mode'], ['panda_power', 'Panda Power'], ['lock_status', 'Lock'],
       ['version', 'Version'], ['slicer_target_temp', 'Slicer Target'],
-      ['cc2_nozzle_temp', 'CC2 Nozzle'], ['cc2_print_status', 'CC2 Print'], ['cc2_print_progress', 'CC2 Progress'],
+      ['cc2_chamber_temp', 'CC2 Chamber'], ['cc2_nozzle_temp', 'CC2 Nozzle'], ['cc2_print_status', 'CC2 Print'], ['cc2_print_progress', 'CC2 Progress'],
       ['cc2_filename', 'CC2 File'], ['cc2_current_layer', 'CC2 Layer'], ['cc2_remaining_time', 'CC2 ETA'],
       ['cc2_z_height', 'CC2 Z'], ['cc2_filament_detected', 'Filament'], ['cc2_has_error', 'CC2 Error'],
       ['cc2_fan_speed', 'Part Fan'], ['cc2_box_fan_speed', 'Enc Fan'], ['cc2_led', 'CC2 LED'],

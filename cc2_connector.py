@@ -855,14 +855,21 @@ def ha_on_disconnect(client: Client, userdata: Any, disconnect_flags: Any, rc: i
 
 
 def heartbeat_thread() -> None:
-    """Send PING to CC2 every 10s."""
+    """Send PING to CC2 every 10s; keep HA MQTT alive every 20s."""
+    tick = 0
     while True:
         try:
             time.sleep(10)
+            tick += 1
             if cc2_client and cc2_client.is_connected():
                 payload = json.dumps({"type": "PING"})
                 cc2_client.publish(f"elegoo/{CC2_SN}/{client_id}/api_request", payload, qos=1)
                 logger.debug("Sent CC2 PING heartbeat")
+            # Publish to HA MQTT every 20s — any outgoing packet resets the broker's
+            # keepalive timer, more reliable than relying on paho PINGREQ.
+            if tick % 2 == 0 and ha_client and ha_client.is_connected():
+                ha_client.publish(f"{CC2_TOPIC_PREFIX}/status", "online", qos=1, retain=True)
+                logger.debug("Sent HA MQTT keepalive")
         except Exception as e:
             logger.error(f"Heartbeat thread error: {e}")
 
@@ -925,7 +932,7 @@ def main() -> None:
         ha_client.on_disconnect = ha_on_disconnect
         ha_client.on_message = ha_on_message
         ha_client.will_set(f"{CC2_TOPIC_PREFIX}/status", "offline", qos=1, retain=True)
-        ha_client.reconnect_delay_set(min_delay=2, max_delay=30)
+        ha_client.reconnect_delay_set(min_delay=1, max_delay=10)
 
         try:
             logger.info(f"Connecting to HA MQTT broker at {HA_MQTT_BROKER}:{HA_MQTT_PORT}")

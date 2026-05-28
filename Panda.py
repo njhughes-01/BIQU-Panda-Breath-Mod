@@ -324,7 +324,8 @@ def on_mqtt_message(client, userdata, msg):
                                 log_event(f"[CC2-SLICER] Applied buffered filament {pending} → {chamber_target:.0f}°C on print start", force_console=True)
                     if chamber_target > 0 and (panda_ws or panda_writer):
                         chamber_now = safe_float(current_data.get("chamber_temp", 0), 0)
-                        needs_preheat = chamber_now < (chamber_target - 5) and not cc2_paused_for_preheat
+                        cc2_chamber_now = safe_float(current_data.get("cc2_chamber_temp", chamber_now), chamber_now)
+                        needs_preheat = min(chamber_now, cc2_chamber_now) < (chamber_target - 5) and not cc2_paused_for_preheat
                         async def _cc2_heat_on_start(t=int(chamber_target), pause=needs_preheat):
                             global cc2_paused_for_preheat
                             try:
@@ -361,6 +362,8 @@ def on_mqtt_message(client, userdata, msg):
                 "led", "has_error", "speed_mode", "file_count", "latest_filename",
             ):
                 mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/cc2_{cc2_key}", val, retain=True)
+                if cc2_key == "chamber_temp":
+                    current_data["cc2_chamber_temp"] = safe_float(val, 0.0)
             elif cc2_key == "active_filament_type":
                 # Empty val = our own print-end clear message; ignore it
                 if not val.strip():
@@ -387,8 +390,9 @@ def on_mqtt_message(client, userdata, msg):
                 log_event(f"[CC2-SLICER] {val} → chamber {target}°C", force_console=True)
                 if (panda_ws or panda_writer) and int(target) > 0:
                     chamber_now = safe_float(current_data.get("chamber_temp", 0), 0)
+                    cc2_chamber_now = safe_float(current_data.get("cc2_chamber_temp", chamber_now), chamber_now)
                     # Don't re-pause on MQTT reconnect delivering retained active_filament_type
-                    needs_preheat = chamber_now < (float(target) - 5) and not cc2_paused_for_preheat
+                    needs_preheat = min(chamber_now, cc2_chamber_now) < (float(target) - 5) and not cc2_paused_for_preheat
                     async def _cc2_heat(t=int(target), pause=needs_preheat):
                         global cc2_paused_for_preheat
                         try:
@@ -1092,12 +1096,15 @@ async def update_limits_from_ws():
                                 retain=True
                             )
 
-                        # Auto-resume CC2 if we paused it waiting for chamber to heat
+                        # Auto-resume CC2 if we paused it waiting for chamber to heat.
+                        # Use the cooler of the Panda Breath sensor and CC2 sensor — conservative.
                         if cc2_paused_for_preheat:
                             _target = float(current_data.get("chamber_setpoint", 0))
-                            _ist = float(current_data.get("chamber_temp", 0))
+                            _pb_ist = float(current_data.get("chamber_temp", 0))
+                            _cc2_ist = float(current_data.get("cc2_chamber_temp", _pb_ist))
+                            _ist = min(_pb_ist, _cc2_ist)
                             if _target > 0 and _ist >= (_target - float(HYSTERESE)):
-                                log_event(f"[CC2-SLICER] Chamber at {_ist:.0f}°C, resuming CC2 print", force_console=True)
+                                log_event(f"[CC2-SLICER] Chamber ready — PB:{_pb_ist:.0f}°C CC2:{_cc2_ist:.0f}°C target:{_target:.0f}°C, resuming CC2 print", force_console=True)
                                 cc2_paused_for_preheat = False
                                 if current_data.get("cc2_print_status") == "paused":
                                     mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/resume_print/press", "", qos=1)
