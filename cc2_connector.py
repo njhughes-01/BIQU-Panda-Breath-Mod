@@ -356,8 +356,9 @@ def publish_to_ha() -> None:
             request_canvas_info()
         elif not is_printing and was_printing:
             # Print ended — reset so next print re-triggers filament detection
-            global _last_filament_type
+            global _last_filament_type, _canvas_info
             _last_filament_type = ""
+            _canvas_info = {}  # Clear stale tray data so next print gets a fresh canvas request
         elif is_printing and active_tray_id >= 0:
             publish_active_filament(active_tray_id)
         _last_print_state = current_state
@@ -690,7 +691,12 @@ def cc2_on_message(client: Client, userdata: Any, msg: Any) -> None:
                 send_cc2_command(2005)
                 send_cc2_command(1044)
             else:
-                logger.error(f"Registration failed: {payload}")
+                logger.error(f"Registration failed: {payload} — retrying in 5s")
+                threading.Timer(5.0, lambda: cc2_client.publish(
+                    f"elegoo/{CC2_SN}/api_register",
+                    json.dumps({"client_id": client_id, "request_id": request_id}),
+                    qos=1
+                )).start()
 
         # Handle full status response (method 1002 reply) and delta updates
         elif "api_response" in msg.topic or "api_status" in msg.topic:

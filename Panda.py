@@ -397,6 +397,10 @@ def on_mqtt_message(client, userdata, msg):
         global_lock = False
         heating_locked = False
         power_forced_off = False
+        if cc2_paused_for_preheat:
+            cc2_paused_for_preheat = False
+            mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/resume_print/press", "", qos=1)
+            log_event("[CC2] Resuming CC2 after unlock", force_console=True)
 
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/lock_status", "UNLOCKED", retain=True)
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/status", "Ready", retain=True)
@@ -438,7 +442,7 @@ def on_mqtt_message(client, userdata, msg):
             if slicer_val > 0:
                 current_data["kammer_soll"] = slicer_val
 
-            if panda_ws and slicer_val > 0:
+            if panda_ws and slicer_val > 0 and not power_forced_off:
                 asyncio.run_coroutine_threadsafe(
                     panda_ws.send(json.dumps({
                         "settings": {
@@ -464,6 +468,14 @@ def on_mqtt_message(client, userdata, msg):
                 log_event(f"[SLICER-WARN] Panda not connected — target {slicer_val}°C queued, will send when WS reconnects", force_console=True)
             else:
                 log_event("[SLICER] Mode ON — waiting for CC2 filament detection to set target", force_console=True)
+
+        else:
+            # Slicer mode OFF — restore temperature to last HA-set value
+            restore = float(ha_memory.get("kammer_soll", 0))
+            if restore > 0:
+                current_data["kammer_soll"] = restore
+                mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(restore), retain=True)
+                log_event(f"[SLICER] Mode OFF — restored chamber target to {restore:.0f}°C", force_console=True)
 
         return
 
@@ -818,9 +830,15 @@ def _on_mqtt_connect(client, userdata, flags, reason_code, properties):
             client.subscribe(f"{CC2_TOPIC_PREFIX}/#")
         setup_mqtt_discovery(client)
         log_event("[MQTT] HA autodiscovery published", force_console=True)
-        # Republish slicer priority state so HA always reflects current value
+        # Republish all runtime state so HA reflects current values after broker restart
         slicer_state = "ON" if current_data.get("slicer_priority_mode") else "OFF"
         client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_priority_mode", slicer_state, retain=True)
+        client.publish(f"{MQTT_TOPIC_PREFIX}/panda_power", "OFF" if power_forced_off else "ON", retain=True)
+        client.publish(f"{MQTT_TOPIC_PREFIX}/lock_status", "LOCKED" if global_lock else "UNLOCKED", retain=True)
+        if global_lock:
+            client.publish(f"{MQTT_TOPIC_PREFIX}/panda_modus", "LOCKED", retain=True)
+        elif power_forced_off:
+            client.publish(f"{MQTT_TOPIC_PREFIX}/panda_modus", "Standby", retain=True)
 
 
 def setup_mqtt():
