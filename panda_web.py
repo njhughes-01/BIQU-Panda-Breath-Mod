@@ -72,6 +72,7 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
     with state_lock:
         state["mqtt_connected"] = False
+    print(f"[MQTT] Disconnected — rc={reason_code}", flush=True)
 
 
 def on_message(client, userdata, msg):
@@ -92,7 +93,7 @@ mqtt_client.on_message = on_message
 def start_mqtt():
     while True:
         try:
-            mqtt_client.connect_async(MQTT_BROKER, MQTT_PORT, keepalive=120)
+            mqtt_client.connect_async(MQTT_BROKER, MQTT_PORT, keepalive=60)
             mqtt_client.loop_forever(retry_first_connection=True)
         except Exception:
             with state_lock:

@@ -743,8 +743,7 @@ def cc2_on_message(client: Client, userdata: Any, msg: Any) -> None:
 
 def cc2_on_disconnect(client: Client, userdata: Any, disconnect_flags: Any, rc: int, properties: Any = None) -> None:
     """CC2 MQTT disconnection callback."""
-    if rc != 0:
-        logger.warning(f"CC2 disconnected with code {rc}, will reconnect...")
+    logger.warning(f"CC2 MQTT disconnected — rc={rc} (0=clean, non-zero=unexpected)")
 
 
 def ha_on_message(client: Client, userdata: Any, msg: Any) -> None:
@@ -834,8 +833,7 @@ def ha_on_connect(client: Client, userdata: Any, connect_flags: Any, rc: int, pr
 
 def ha_on_disconnect(client: Client, userdata: Any, disconnect_flags: Any, rc: int, properties: Any = None) -> None:
     """Home Assistant MQTT disconnection callback."""
-    if rc != 0:
-        logger.warning(f"HA disconnected with code {rc}, will reconnect...")
+    logger.warning(f"HA MQTT disconnected — rc={rc} (0=clean, non-zero=unexpected)")
 
 
 def heartbeat_thread() -> None:
@@ -913,7 +911,7 @@ def main() -> None:
 
         try:
             logger.info(f"Connecting to HA MQTT broker at {HA_MQTT_BROKER}:{HA_MQTT_PORT}")
-            ha_client.connect_async(HA_MQTT_BROKER, HA_MQTT_PORT, keepalive=120)
+            ha_client.connect_async(HA_MQTT_BROKER, HA_MQTT_PORT, keepalive=60)
             ha_thread = threading.Thread(target=ha_client.loop_forever, daemon=True, name="ha-mqtt-loop")
             ha_thread.start()
         except Exception as e:

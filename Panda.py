@@ -853,6 +853,10 @@ def setup_mqtt_discovery(client):
     }), retain=True)
 
 
+def _on_mqtt_disconnect(client, userdata, disconnect_flags, reason_code, properties):
+    log_event(f"[MQTT] Disconnected — reason={reason_code}", force_console=True)
+
+
 def _on_mqtt_connect(client, userdata, flags, reason_code, properties):
     if not reason_code.is_failure:
         try:
@@ -887,8 +891,9 @@ def setup_mqtt():
     client.username_pw_set(MQTT_USER, MQTT_PASS)
     client.on_message = on_mqtt_message
     client.on_connect = _on_mqtt_connect
+    client.on_disconnect = _on_mqtt_disconnect
     client.reconnect_delay_set(min_delay=2, max_delay=30)
-    client.connect_async(MQTT_BROKER, MQTT_PORT, keepalive=120)
+    client.connect_async(MQTT_BROKER, MQTT_PORT, keepalive=60)
     mqtt_thread = threading.Thread(target=client.loop_forever, daemon=True, name="panda-mqtt-loop")
     mqtt_thread.start()
     return client
