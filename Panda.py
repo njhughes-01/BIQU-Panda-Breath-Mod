@@ -290,6 +290,7 @@ def on_mqtt_message(client, userdata, msg):
                     mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", 0, retain=True)
                     # Clear retained active_filament_type so next print doesn't preheat-pause immediately
                     mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/active_filament_type", "", retain=True)
+                    current_data["cc2_pending_filament"] = ""
                     log_event(f"[CC2-SLICER] Print ended ({prev_status}→{new_status}), turning off chamber heater", force_console=True)
                     if cc2_paused_for_preheat:
                         cc2_paused_for_preheat = False
@@ -300,9 +301,19 @@ def on_mqtt_message(client, userdata, msg):
                             log_event(f"[CC2-OFF-ERR] Failed to turn off heater at print end: {e}", force_console=True)
                     asyncio.run_coroutine_threadsafe(_cc2_off(), main_loop)
                 # Re-arm heating when print starts — handles retained active_filament_type
-                # arriving before print_status on MQTT reconnect
+                # arriving before print_status on MQTT reconnect or container restart
                 elif prev_status not in _cc2_printing_states and new_status in _cc2_printing_states:
                     kammer = float(current_data.get("kammer_soll", 0))
+                    # If kammer_soll not set yet, apply any buffered filament type
+                    if kammer == 0:
+                        pending = current_data.get("cc2_pending_filament", "")
+                        if pending:
+                            fil_target = FILAMENT_CHAMBER_MAP.get(pending.upper(), FILAMENT_CHAMBER_MAP.get(pending))
+                            if fil_target is not None and fil_target > 0:
+                                current_data["kammer_soll"] = float(fil_target)
+                                mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(fil_target), retain=True)
+                                kammer = float(fil_target)
+                                log_event(f"[CC2-SLICER] Applied buffered filament {pending} → {kammer:.0f}°C on print start", force_console=True)
                     if kammer > 0 and (panda_ws or panda_writer):
                         chamber_now = safe_float(current_data.get("kammer_ist", 0), 0)
                         needs_preheat = chamber_now < (kammer - 5) and not cc2_paused_for_preheat
@@ -332,13 +343,18 @@ def on_mqtt_message(client, userdata, msg):
             ):
                 mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/cc2_{cc2_key}", val, retain=True)
             elif cc2_key == "active_filament_type":
+                # Empty val = our own print-end clear message; ignore it
+                if not val.strip():
+                    return
                 if not current_data.get("slicer_priority_mode"):
                     log_event("[CC2-SLICER] Ignoring active_filament_type — slicer_priority_mode off", force_console=True)
                     return
-                # Only act when CC2 is actively printing — ignore retained startup messages
+                # Always buffer the filament type — print_status may not have arrived yet
+                # on container restart or MQTT reconnect. The print_start handler will apply it.
+                current_data["cc2_pending_filament"] = val
                 _cc2_active = current_data.get("cc2_print_status", "idle")
                 if _cc2_active not in _cc2_printing_states:
-                    log_event(f"[CC2-SLICER] Ignoring active_filament_type={val!r} — cc2_print_status={_cc2_active!r} not printing", force_console=True)
+                    log_event(f"[CC2-SLICER] Buffered filament={val!r} (status={_cc2_active!r}, waiting for print start)", force_console=True)
                     return
                 target = FILAMENT_CHAMBER_MAP.get(val.upper(), FILAMENT_CHAMBER_MAP.get(val))
                 if target is None:
@@ -1387,71 +1403,64 @@ async def handle_panda(reader, writer):
 
         while not writer.is_closing():
             try:
-                # ============================================================
-                # ✅ OPTIMIERUNG: HA REQUEST AUSLAGERN (verhindert TLS-Timeout)
-                # ------------------------------------------------------------
-                # requests.get ist BLOCKIEREND. 
-                # Wenn HA langsam antwortet, friert der TLS Loop ein.
-                # Deshalb wird der Request in einen Thread ausgelagert.
-                # ============================================================
-                loop = asyncio.get_running_loop()
+                if CC2_IP:
+                    # In CC2 mode bed temp arrives via MQTT from cc2_connector — no HA REST needed.
+                    # Never reset global_heating_state here; the WS loop owns heating in CC2 mode.
+                    bed_ist = safe_float(current_data.get("bed_temp", 0), 0.0)
+                else:
+                    # ============================================================
+                    # HA REST bed sensor fetch (traditional / non-CC2 mode only)
+                    # ============================================================
+                    loop = asyncio.get_running_loop()
 
-                def fetch_ha():
-                    return requests.get(
-                        HA_URL,
-                        headers={"Authorization": f"Bearer {HA_TOKEN}"},
-                        timeout=2
-                    )
-
-                # ============================================================
-                # ✅ HA SENSOR ERROR HANDLING (MIT STATUS-FLAG)
-                # ============================================================
-                try:
-                    h_resp = await loop.run_in_executor(None, fetch_ha)
-                    h_resp.raise_for_status()
+                    def fetch_ha():
+                        return requests.get(
+                            HA_URL,
+                            headers={"Authorization": f"Bearer {HA_TOKEN}"},
+                            timeout=2
+                        )
 
                     try:
-                        ha_data = h_resp.json()
-                    except Exception:
-                        raw_text = h_resp.text.strip()
-                        if raw_text in ("unknown", "unavailable", ""):
-                            raise ValueError(f"Invalid bed sensor state: {raw_text}")
-                        bed_ist = float(raw_text)
-                    else:
-                        if isinstance(ha_data, dict):
-                            raw_state = str(ha_data.get("state", "")).strip()
+                        h_resp = await loop.run_in_executor(None, fetch_ha)
+                        h_resp.raise_for_status()
+
+                        try:
+                            ha_data = h_resp.json()
+                        except Exception:
+                            raw_text = h_resp.text.strip()
+                            if raw_text in ("unknown", "unavailable", ""):
+                                raise ValueError(f"Invalid bed sensor state: {raw_text}")
+                            bed_ist = float(raw_text)
                         else:
-                            raw_state = str(ha_data).strip()
+                            if isinstance(ha_data, dict):
+                                raw_state = str(ha_data.get("state", "")).strip()
+                            else:
+                                raw_state = str(ha_data).strip()
 
-                        if raw_state in ("unknown", "unavailable", ""):
-                            raise ValueError(f"Invalid bed sensor state: {raw_state}")
-                        bed_ist = float(raw_state)
+                            if raw_state in ("unknown", "unavailable", ""):
+                                raise ValueError(f"Invalid bed sensor state: {raw_state}")
+                            bed_ist = float(raw_state)
 
-                    # Wenn vorher Fehler war → jetzt wieder OK melden
-                    if bed_sensor_error:
-                        log_event("[BED-SENSOR] Connection restored", force_console=True)
-                        mqtt_client.publish(
-                            f"{MQTT_TOPIC_PREFIX}/status",
-                            "Ready",
-                            retain=True
-                        )
-                        bed_sensor_error = False
+                        if bed_sensor_error:
+                            log_event("[BED-SENSOR] Connection restored", force_console=True)
+                            mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/status", "Ready", retain=True)
+                            bed_sensor_error = False
 
-                except Exception as ha_err:
-                    bed_ist = 0.0
-                    global_heating_state = 20.0  # Sicherheit AUS
+                    except Exception as ha_err:
+                        bed_ist = 0.0
+                        global_heating_state = 20.0
 
-                    if not bed_sensor_error:
-                        log_event(f"[BED-SENSOR-ERR] {ha_err}", force_console=True)
-                        mqtt_client.publish(
-                            f"{MQTT_TOPIC_PREFIX}/status",
-                            "Check Bed Temperature Sensor",
-                            retain=True
-                        )
-                        bed_sensor_error = True
+                        if not bed_sensor_error:
+                            log_event(f"[BED-SENSOR-ERR] {ha_err}", force_console=True)
+                            mqtt_client.publish(
+                                f"{MQTT_TOPIC_PREFIX}/status",
+                                "Check Bed Temperature Sensor",
+                                retain=True
+                            )
+                            bed_sensor_error = True
 
-                    await asyncio.sleep(2)
-                    continue
+                        await asyncio.sleep(2)
+                        continue
                 # ============================================================
                 
                 # 2. Variablen laden
