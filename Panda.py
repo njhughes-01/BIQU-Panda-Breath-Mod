@@ -776,7 +776,7 @@ def on_mqtt_message(client, userdata, msg):
 def setup_mqtt_discovery(client):
     base, dev = MQTT_TOPIC_PREFIX, {"identifiers": [PRINTER_SN], "name": "Panda Breath Mod", "model": "V6.8 Final", "manufacturer": "Biqu"}
     for sfx, name, unit, icon, mn, mx in [
-        ("soll",       "Chamber Target",       "°C",  "mdi:thermometer",  1,  80),
+        ("soll",       "Chamber Target",       "°C",  "mdi:thermometer",  0,  80),
         ("limit",      "Bed Limit",             "°C",  "mdi:thermometer",  1, 120),
         ("filtertemp", "Filter Fan Activation", "°C",  "mdi:fan-clock",    1, 120),
         ("dry_temp",   "Drying Temp",           "°C",  "mdi:thermometer",  1,  80),
@@ -793,7 +793,7 @@ def setup_mqtt_discovery(client):
         "name": "Panda Mode",
         "state_topic": f"{base}/panda_modus",
         "command_topic": f"{base}/mode_select/set",
-        "options": ["Automatic", "Manual", "Dry"],
+        "options": ["Automatic", "Manual", "Dry", "Standby", "LOCKED"],
         "unique_id": f"{PRINTER_SN}_mode_select",
         "device": dev,
         "icon": "mdi:state-machine"
@@ -813,7 +813,7 @@ def setup_mqtt_discovery(client):
     }), retain=True)
 
     client.publish(f"homeassistant/binary_sensor/{base}_fan/config", json.dumps({
-        "name": "Panda Filter Fan", "state_topic": f"{base}/fan", "unique_id": f"pb_v66_{PRINTER_SN}_fan", "device": dev, "payload_on": "ON", "payload_off": "OFF", "device_class": "fan"
+        "name": "Panda Filter Fan", "state_topic": f"{base}/fan", "unique_id": f"pb_v66_{PRINTER_SN}_fan", "device": dev, "payload_on": "ON", "payload_off": "OFF"
     }), retain=True)
 
     client.publish(f"homeassistant/switch/{base}_panda_power/config", json.dumps({
