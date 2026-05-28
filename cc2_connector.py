@@ -839,15 +839,7 @@ def ha_on_disconnect(client: Client, userdata: Any, disconnect_flags: Any, rc: i
 
 
 def heartbeat_thread() -> None:
-    """Send PING to CC2 every 10s; publish HA status every 20s to prevent MQTT keepalive timeout.
-
-    cc2_backend only publishes to HA when values change. When the printer is idle all
-    sensor values are static, so no MQTT data flows to HA for >30s. paho-mqtt then sends
-    PINGREQ and if PINGRESP doesn't arrive in time it disconnects ("Keep alive timeout").
-    Publishing status every 20s resets paho's _last_msg_out timer and prevents PINGREQ
-    from firing at all.
-    """
-    ha_tick = 0
+    """Send PING to CC2 every 10s."""
     while True:
         try:
             time.sleep(10)
@@ -855,14 +847,27 @@ def heartbeat_thread() -> None:
                 payload = json.dumps({"type": "PING"})
                 cc2_client.publish(f"elegoo/{CC2_SN}/{client_id}/api_request", payload, qos=1)
                 logger.debug("Sent CC2 PING heartbeat")
-            ha_tick += 1
-            if ha_tick >= 2:  # every 20s
-                ha_tick = 0
-                if ha_client and ha_client.is_connected():
-                    ha_client.publish(f"{CC2_TOPIC_PREFIX}/status", "online", qos=1, retain=True)
-                    logger.debug("Sent HA heartbeat (status=online)")
         except Exception as e:
             logger.error(f"Heartbeat thread error: {e}")
+
+
+def publish_poll_thread() -> None:
+    """Force-publish all current printer state to HA every 30 seconds.
+
+    HA expects integrations to push a full state refresh on a regular interval,
+    not only on change. When the printer is idle all CC2 sensor values are static
+    so cc2_on_message stops calling publish_to_ha; clearing _last_published and
+    re-publishing ensures HA entities always reflect current state and never go stale.
+    """
+    while True:
+        try:
+            time.sleep(30)
+            if ha_client and ha_client.is_connected():
+                _last_published.clear()
+                publish_to_ha()
+                logger.debug("Forced full state publish to HA (30s poll)")
+        except Exception as e:
+            logger.error(f"Publish poll thread error: {e}")
 
 
 def main() -> None:
@@ -926,10 +931,12 @@ def main() -> None:
         logger.error(f"Failed to initialize CC2 MQTT connection: {e}")
         sys.exit(1)
 
-    # Start heartbeat thread
+    # Start background threads
     hb_thread = threading.Thread(target=heartbeat_thread, daemon=True)
     hb_thread.start()
-    logger.info("Heartbeat thread started")
+    poll_thread = threading.Thread(target=publish_poll_thread, daemon=True, name="ha-poll-loop")
+    poll_thread.start()
+    logger.info("Heartbeat and HA poll threads started")
 
     # Main loop
     try:
