@@ -16,7 +16,7 @@ BASE_DIR = Path(__file__).resolve().parent
 # - Entfernt NICHTS: Original bleibt, Erweiterungen sind additiv/ersetzend innerhalb
 #   der bestehenden Struktur (nur ergänzt/erweitert).
 # ============================================================
-PANDA_VERSION = "v2.0.0"
+PANDA_VERSION = "v2.0.1"
 last_reported_mode = None
 mode_change_hint = ""
 heating_locked = False
@@ -338,8 +338,11 @@ def on_mqtt_message(client, userdata, msg):
                                 if not cc2_paused_for_preheat:
                                     mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/pause_print/press", "", qos=1)
                                     cc2_paused_for_preheat = True
-                        asyncio.run_coroutine_threadsafe(_cc2_heat_on_start(), main_loop)
+                        if main_loop:
+                            asyncio.run_coroutine_threadsafe(_cc2_heat_on_start(), main_loop)
                         log_event(f"[CC2-SLICER] Print started, re-arming chamber heat to {kammer:.0f}°C", force_console=True)
+                    elif kammer > 0:
+                        log_event(f"[CC2-SLICER] Print started, Panda not connected — heat queued at kammer_soll={kammer:.0f}°C, will fire on WS connect", force_console=True)
             elif cc2_key == "filename":
                 mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/cc2_filename", val, retain=True)
                 if val:
@@ -402,7 +405,10 @@ def on_mqtt_message(client, userdata, msg):
                             if not cc2_paused_for_preheat:
                                 mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/pause_print/press", "", qos=1)
                                 cc2_paused_for_preheat = True
-                    asyncio.run_coroutine_threadsafe(_cc2_heat(), main_loop)
+                    if main_loop:
+                        asyncio.run_coroutine_threadsafe(_cc2_heat(), main_loop)
+                    else:
+                        log_event(f"[CC2-SLICER] main_loop not ready — heat queued in kammer_soll={target}°C", force_console=True)
                 elif int(target) == 0:
                     current_data["kammer_soll"] = 0.0
                     current_data["slicer_soll"] = 0.0
@@ -414,7 +420,8 @@ def on_mqtt_message(client, userdata, msg):
                             await panda_send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "set_temp": 0}}))
                         except Exception as e:
                             log_event(f"[CC2-OFF-ERR] {e}", force_console=True)
-                    asyncio.run_coroutine_threadsafe(_cc2_off_no_heat(), main_loop)
+                    if main_loop:
+                        asyncio.run_coroutine_threadsafe(_cc2_off_no_heat(), main_loop)
                     log_event(f"[CC2-SLICER] {val} needs no chamber heat — heater off", force_console=True)
                 else:
                     log_event("[CC2-SLICER] Panda not connected, heating queued in kammer_soll", force_console=True)
@@ -1004,6 +1011,7 @@ async def update_limits_from_ws():
                                     "settings": {"work_mode": 2}
                                 }))
                                 log_event("[CC2] Forced work_mode=2 (Manual) on connect", force_console=True)
+                                await asyncio.sleep(0.2)
                             # Re-sync heating state after reconnect — if heater was
                             # supposed to be on before WS dropped, re-send the command.
                             kammer = float(current_data.get("kammer_soll", 0))
@@ -1011,6 +1019,7 @@ async def update_limits_from_ws():
                                 log_event(f"[WS-RECONNECT] Resuming heat to {kammer:.0f}°C after WS reconnect", force_console=True)
                                 await websocket.send(json.dumps({
                                     "settings": {
+                                        "work_mode": 2,
                                         "work_on": True,
                                         "set_temp": int(kammer),
                                         "isrunning": 1
@@ -1318,13 +1327,14 @@ async def update_limits_from_ws():
                                 last_switch_time = time.time()
                                 last_stop_command_time = 0
                                 try:
-                                    await panda_ws.send(json.dumps({
-                                        "settings": {
-                                            "work_on": True,
-                                            "set_temp": int(target),
-                                            "isrunning": 1
-                                        }
-                                    }))
+                                    heat_cmd: dict = {
+                                        "work_on": True,
+                                        "set_temp": int(target),
+                                        "isrunning": 1
+                                    }
+                                    if CC2_IP:
+                                        heat_cmd["work_mode"] = 2
+                                    await panda_ws.send(json.dumps({"settings": heat_cmd}))
                                 except Exception as e:
                                     log_event(f"[AUTO-ON-ERR] target={int(target)}°C chamber={ist:.1f}°C: {e}", force_console=True)
                                     global_heating_state = 20.0  # Reset so next cycle retries

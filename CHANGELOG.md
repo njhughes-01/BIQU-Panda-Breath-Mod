@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-05-28
+
+### Fixed
+- **Heater not starting on print**: `main_loop` can be `None` when retained MQTT messages arrive
+  during container startup before `asyncio.run(main())` sets it — `run_coroutine_threadsafe(None)`
+  silently dropped the heat command; now guarded with `if main_loop:` check
+- **WS loop heat command missing `work_mode=2`** in CC2 mode — device could be in Standby
+  (work_mode=0) and ignore the `work_on/isrunning` command; now always forces Manual mode
+- **Reconnect heat command** now also includes `work_mode=2` (was sent separately, race possible);
+  added 0.2s delay between `work_mode=2` and the heat command to let device process mode change
+- **Missing log** when print starts with kammer_soll>0 but Panda WS not yet connected — now logs
+  "heat queued at kammer_soll=X°C, will fire on WS connect" for easier diagnosis
+
 ## [2.0.0] - 2026-05-28
 
 ### Added
