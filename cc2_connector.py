@@ -303,9 +303,9 @@ def publish_to_ha() -> None:
         fans_obj = printer_state.get("fans") or {}
         # CC2 fan speeds are 0-255; normalize to 0-100%
         raw_fan = float((fans_obj.get("fan") or {}).get("speed") or 0)
-        fan_speed = int(round(raw_fan / 255 * 100)) if raw_fan > 1 else int(round(raw_fan * 100))
+        fan_speed = int(round(raw_fan / 255 * 100))
         raw_box = float((fans_obj.get("box_fan") or {}).get("speed") or 0)
-        box_fan_speed = int(round(raw_box / 255 * 100)) if raw_box > 1 else int(round(raw_box * 100))
+        box_fan_speed = int(round(raw_box / 255 * 100))
 
         led_obj = printer_state.get("led") or {}
         led_status = "ON" if led_obj.get("status") else "OFF"

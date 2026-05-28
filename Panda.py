@@ -776,7 +776,7 @@ def on_mqtt_message(client, userdata, msg):
 def setup_mqtt_discovery(client):
     base, dev = MQTT_TOPIC_PREFIX, {"identifiers": [PRINTER_SN], "name": "Panda Breath Mod", "model": "V6.8 Final", "manufacturer": "Biqu"}
     for sfx, name, unit, icon, mn, mx in [
-        ("soll",       "Chamber Target",       "°C",  "mdi:thermometer",  0,  80),
+        ("soll",       "Chamber Target",       "°C",  "mdi:thermometer",  0,  85),
         ("limit",      "Bed Limit",             "°C",  "mdi:thermometer",  1, 120),
         ("filtertemp", "Filter Fan Activation", "°C",  "mdi:fan-clock",    1, 120),
         ("dry_temp",   "Drying Temp",           "°C",  "mdi:thermometer",  1,  80),
