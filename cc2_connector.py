@@ -8,6 +8,7 @@ import os
 import json
 import time
 import random
+import socket
 import threading
 import logging
 import sys
@@ -778,9 +779,24 @@ def ha_on_message(client: Client, userdata: Any, msg: Any) -> None:
         request_file_list()
 
 
+def _set_tcp_keepalive(client: Client) -> None:
+    """Enable TCP SO_KEEPALIVE on the client socket to prevent NAT/firewall idle-timeout drops."""
+    try:
+        sock = client.socket()
+        if sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 10)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+            logger.info("TCP keepalive set on HA MQTT socket (idle=10s interval=5s count=3)")
+    except Exception as e:
+        logger.warning(f"Could not set TCP keepalive: {e}")
+
+
 def ha_on_connect(client: Client, userdata: Any, connect_flags: Any, rc: int, properties: Any = None) -> None:
     """Home Assistant MQTT connection callback."""
     if rc == 0:
+        _set_tcp_keepalive(client)
         logger.info("Connected to HA MQTT broker")
         client.publish(f"{CC2_TOPIC_PREFIX}/status", "online", qos=1, retain=True)
         publish_ha_autodiscovery()

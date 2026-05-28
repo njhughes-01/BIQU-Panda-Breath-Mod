@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import asyncio, ssl, json, time, requests, websockets, os, threading
+import asyncio, ssl, json, time, requests, websockets, os, socket, threading
 import logging
 import paho.mqtt.client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
@@ -759,6 +759,16 @@ def setup_mqtt_discovery(client):
 
 def _on_mqtt_connect(client, userdata, flags, reason_code, properties):
     if not reason_code.is_failure:
+        try:
+            sock = client.socket()
+            if sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 10)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+                log_event("[MQTT] TCP keepalive set (idle=10s interval=5s count=3)", force_console=True)
+        except Exception as e:
+            log_event(f"[MQTT-WARN] Could not set TCP keepalive: {e}", force_console=True)
         # Re-subscribe on every connect/reconnect so subscriptions survive HA MQTT restarts
         client.subscribe(f"{MQTT_TOPIC_PREFIX}/#")
         if CC2_IP:
