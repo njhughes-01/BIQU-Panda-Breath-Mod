@@ -776,7 +776,7 @@ def setup_mqtt():
     client.on_message = on_mqtt_message
     client.on_connect = _on_mqtt_connect
     client.reconnect_delay_set(min_delay=2, max_delay=30)
-    client.connect_async(MQTT_BROKER, 1883, keepalive=120)
+    client.connect_async(MQTT_BROKER, 1883, keepalive=30)
     mqtt_thread = threading.Thread(target=client.loop_forever, daemon=True, name="panda-mqtt-loop")
     mqtt_thread.start()
     return client

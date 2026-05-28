@@ -853,11 +853,11 @@ def main() -> None:
         ha_client.on_disconnect = ha_on_disconnect
         ha_client.on_message = ha_on_message
         ha_client.will_set(f"{CC2_TOPIC_PREFIX}/status", "offline", qos=1, retain=True)
-        ha_client.reconnect_delay_set(min_delay=10, max_delay=120)
+        ha_client.reconnect_delay_set(min_delay=2, max_delay=30)
 
         try:
             logger.info(f"Connecting to HA MQTT broker at {HA_MQTT_BROKER}:{HA_MQTT_PORT}")
-            ha_client.connect_async(HA_MQTT_BROKER, HA_MQTT_PORT, keepalive=120)
+            ha_client.connect_async(HA_MQTT_BROKER, HA_MQTT_PORT, keepalive=30)
             ha_thread = threading.Thread(target=ha_client.loop_forever, daemon=True, name="ha-mqtt-loop")
             ha_thread.start()
         except Exception as e:
