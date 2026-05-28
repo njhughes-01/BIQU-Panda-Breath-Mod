@@ -591,6 +591,8 @@ def on_mqtt_message(client, userdata, msg):
                         "isrunning": 1
                     }
                 }))
+                await asyncio.sleep(0.3)
+                await panda_ws.send(json.dumps({"get_settings": 1}))
 
         asyncio.run_coroutine_threadsafe(flow(), main_loop)
         return
@@ -620,10 +622,12 @@ def on_mqtt_message(client, userdata, msg):
                     },
                     "ui_action": "auto"
                 }))
+                await asyncio.sleep(0.3)
+                await panda_ws.send(json.dumps({"get_settings": 1}))
 
         asyncio.run_coroutine_threadsafe(flow(), main_loop)
         return
-        
+
     # --- DRY MODUS ---
     if msg.topic.endswith("/drying/set"):
         log_event(">>> DRYER MODE ENTERED <<<", force_console=True)
@@ -1383,6 +1387,9 @@ async def update_limits_from_ws():
 
                         fan_state = "ON" if bed_ist >= float(current_data.get("filtertemp", 30.0)) else "OFF"
                         actual_heating = (panda_running and work_on_live in (1, True, "1"))
+                        # In CC2 mode device confirmation (isrunning) can lag; use our commanded
+                        # state for the Heat tile. In legacy mode use device confirmation.
+                        heating_active = (global_heating_state == RELAY_ON) if CC2_IP else actual_heating
 
                         # State-transition logging — always on, not gated by DEBUG
                         _now_log = time.time()
@@ -1410,14 +1417,14 @@ async def update_limits_from_ws():
                         elif (_now_log - _last_heat_log_time) >= 60:
                             log_event(
                                 f"[STATUS] Chamber {ist:.0f}/{target:.0f}°C | "
-                                f"Heat:{'ON' if actual_heating else 'OFF'} | {info}",
+                                f"Heat:{'ON' if heating_active else 'OFF'} | {info}",
                                 force_console=True
                             )
                             _last_heat_log_time = _now_log
 
                         mqtt_client.publish(
                             f"{MQTT_TOPIC_PREFIX}/heating",
-                            "ON" if actual_heating else "OFF",
+                            "ON" if heating_active else "OFF",
                             retain=True
                         )
                         mqtt_client.publish(
