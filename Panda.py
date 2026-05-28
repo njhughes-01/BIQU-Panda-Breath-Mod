@@ -16,7 +16,7 @@ BASE_DIR = Path(__file__).resolve().parent
 # - Entfernt NICHTS: Original bleibt, Erweiterungen sind additiv/ersetzend innerhalb
 #   der bestehenden Struktur (nur ergänzt/erweitert).
 # ============================================================
-PANDA_VERSION = "v2.0.3"
+PANDA_VERSION = "v2.0.4"
 RELAY_ON = 85.0   # relay-on sentinel (sent to Panda device as set_temp when heating)
 RELAY_OFF = 20.0  # relay-off sentinel
 last_reported_mode = None

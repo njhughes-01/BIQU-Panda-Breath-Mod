@@ -3,6 +3,44 @@
 All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [2.0.4] - 2026-05-28
+
+### Fixed
+- **HA MQTT "Keep alive timeout" every ~2 minutes** in `cc2_connector` — switched `ha_client`
+  from a manual `loop_forever()` thread to paho's `loop_start()` (internally managed thread)
+  and reduced `keepalive` from 60s to 30s; the manual thread was not reliably sending MQTT
+  PINGREQs, causing broker-side keep-alive timeouts. These disconnects were also the root
+  cause of delayed heater shut-off: `cc2_backend` couldn't forward `print_status=cancelled`
+  to HA while disconnected, so `panda_backend` never got the turn-off signal until HA reconnected
+- **Heat tile shows OFF despite active heating in CC2 mode** — in CC2 mode the Panda Breath
+  device's `isrunning` confirmation lags the heat command; chamber temperature was rising but
+  the Heat tile (and `heating` MQTT topic) showed OFF for up to 60s. Now uses
+  `global_heating_state == RELAY_ON` for the Heat tile in CC2 mode (our commanded state)
+  rather than waiting for device confirmation; legacy Klipper mode unchanged
+- **`get_settings` poll missing from manual/set and auto/set handlers** — added 0.3s-delayed
+  `get_settings` poll after mode-switch heat commands (same as CC2 slicer path) so device
+  state syncs within ~0.5s after a mode change
+- **Syntax error in if/elif chain** — `_cc2_printing` assignment was inserted between `elif`
+  clauses in both WS loop and TLS emulation loop, breaking Python parsing; moved before the
+  `if global_lock:` block in both locations
+- **cc2_backend startup crash** — `loop_forever()` raised a TCP timeout on first CC2 MQTT
+  connect attempt (printer not ready yet), calling `sys.exit(1)`; fixed with
+  `retry_first_connection=True`
+- **panda_web MQTT keepalive drops** — added TCP `SO_KEEPALIVE` (idle=10s) to panda_web MQTT
+  `on_connect`, matching the panda_backend socket hardening
+- **Filament type selected at idle/startup** — `publish_active_filament` was called on canvas
+  info responses regardless of print state; now only fires when `print_state` is in the active
+  printing set (`printing`, `preheating`, `paused`, etc.)
+- **Tray lookup by list index instead of tray_id field** — `active_tray_id` was used as a
+  `tray_list` array index; CC2 reports slot numbers (e.g. 4) not list positions, so the lookup
+  silently fell through to first-tray fallback. Now matches by each tray's own `tray_id` field;
+  logs a warning with available IDs if the active tray isn't found
+- **CC2 disconnect not reflected in HA** — `cc2_on_disconnect` now publishes
+  `{prefix}/status=offline` and clears `_canvas_info`/`_last_filament_type`; reconnect
+  republishes `status=online` without requiring an HA MQTT reconnect
+- **TLS emulation server started in CC2 mode** — port 8883 was opened and cert files required
+  even though no Panda Touch connects in CC2 mode; server now skipped when `CC2_IP` is set
+
 ## [2.0.3] - 2026-05-28
 
 ### Added
