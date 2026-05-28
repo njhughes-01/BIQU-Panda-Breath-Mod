@@ -16,9 +16,10 @@ BASE_DIR = Path(__file__).resolve().parent
 # - Entfernt NICHTS: Original bleibt, Erweiterungen sind additiv/ersetzend innerhalb
 #   der bestehenden Struktur (nur ergänzt/erweitert).
 # ============================================================
-PANDA_VERSION = "v2.0.4"
+PANDA_VERSION = "v2.0.5"
 RELAY_ON = 85.0   # relay-on sentinel (sent to Panda device as set_temp when heating)
 RELAY_OFF = 20.0  # relay-off sentinel
+_discovery_published = False  # publish autodiscovery once; retain keeps it on broker
 last_reported_mode = None
 mode_change_hint = ""
 heating_locked = False
@@ -274,6 +275,15 @@ def on_mqtt_message(client, userdata, msg):
     global power_pending_until
     global cc2_paused_for_preheat
     global global_heating_state
+    global _discovery_published
+
+    # HA birth message — republish autodiscovery when HA restarts
+    if msg.topic == "homeassistant/status" and msg.payload.decode().strip() == "online":
+        log_event("[MQTT] HA restarted — republishing autodiscovery", force_console=True)
+        setup_mqtt_discovery(client)
+        _discovery_published = True
+        return
+
     # ============================================================
     # CC2 METRICS — only active when CC2_IP is configured in the environment
     # ------------------------------------------------------------
@@ -887,6 +897,7 @@ def _on_mqtt_disconnect(client, userdata, disconnect_flags, reason_code, propert
 
 
 def _on_mqtt_connect(client, userdata, flags, reason_code, properties):
+    global _discovery_published
     if not reason_code.is_failure:
         try:
             sock = client.socket()
@@ -898,12 +909,18 @@ def _on_mqtt_connect(client, userdata, flags, reason_code, properties):
                 log_event("[MQTT] TCP keepalive set (idle=10s interval=5s count=3)", force_console=True)
         except Exception as e:
             log_event(f"[MQTT-WARN] Could not set TCP keepalive: {e}", force_console=True)
-        # Re-subscribe on every connect/reconnect so subscriptions survive HA MQTT restarts
+        # With clean_session=False the broker retains subscriptions, but re-subscribing
+        # here ensures they're fresh after any broker restart.
         client.subscribe(f"{MQTT_TOPIC_PREFIX}/#")
         if CC2_IP:
             client.subscribe(f"{CC2_TOPIC_PREFIX}/#")
-        setup_mqtt_discovery(client)
-        log_event("[MQTT] HA autodiscovery published", force_console=True)
+        client.subscribe("homeassistant/status")  # HA birth message for discovery republish
+        # Only publish autodiscovery on first connect — retained messages persist on the
+        # broker and don't need to be re-sent on every reconnect (same pattern as cc2_backend).
+        if not _discovery_published:
+            setup_mqtt_discovery(client)
+            _discovery_published = True
+            log_event("[MQTT] HA autodiscovery published (first connect)", force_console=True)
         # Republish all runtime state so HA reflects current values after broker restart
         slicer_state = "ON" if current_data.get("slicer_priority_mode") else "OFF"
         client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_priority_mode", slicer_state, retain=True)
@@ -917,7 +934,9 @@ def _on_mqtt_connect(client, userdata, flags, reason_code, properties):
 
 
 def setup_mqtt():
-    client = mqtt.Client(callback_api_version=CallbackAPIVersion.VERSION2, client_id=f"PandaNative_{PRINTER_SN}")
+    client = mqtt.Client(callback_api_version=CallbackAPIVersion.VERSION2,
+                         client_id=f"PandaNative_{PRINTER_SN}",
+                         clean_session=False)
     client.username_pw_set(MQTT_USER, MQTT_PASS)
     client.on_message = on_mqtt_message
     client.on_connect = _on_mqtt_connect

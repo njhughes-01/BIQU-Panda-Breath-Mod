@@ -3,6 +3,37 @@
 All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [2.0.5] - 2026-05-28
+
+### Fixed
+- **HA MQTT disconnects (panda_backend)** — same best-practice fix applied as cc2_backend:
+  `clean_session=False` with stable `PandaNative_{PRINTER_SN}` client_id; autodiscovery
+  published once on first connect only; subscribes to `homeassistant/status` birth message
+  and republishes discovery when HA restarts
+- **Device turns off when chamber reaches target in CC2 mode** — when at temperature with
+  an active CC2 print the WS loop was sending `work_on=False`, killing the device's internal
+  PID temperature control. Fixed: `target_state` stays `RELAY_ON` while `_cc2_printing` and
+  `target > 0`; device manages setpoint autonomously. Only turns off when print ends
+- **Print never resumed after chamber reached target** — `cc2_chamber_temp=0` stale retained
+  message from cc2_backend startup caused `min(chamber_temp, 0) = 0 < target`, blocking the
+  resume condition forever. Both sensors are now used with a `> 5°C` validity guard; falls back
+  to Panda Breath sensor alone if CC2 reading is not yet valid
+- **HA MQTT disconnects (cc2_backend)** — correct HA/Mosquitto integration pattern:
+  `clean_session=False` with stable `cc2_bridge_{CC2_SN}` client_id; autodiscovery published
+  once on first connect; subscribes to `homeassistant/status` birth message and republishes
+  discovery only when HA restarts; `loop_forever()` in daemon thread
+- **HA MQTT keepalive drops** — added explicit `cc2/status=online` publish in heartbeat_thread
+  every 20s to keep broker keepalive timer alive; tightened reconnect delay to min=1/max=10s
+- **CC2 chamber temp in preheat logic** — `current_data["cc2_chamber_temp"]` populated from
+  `cc2/chamber_temp` MQTT subscription; used alongside Panda Breath sensor for `needs_preheat`
+  and auto-resume decisions; `> 5°C` guard prevents stale startup value from blocking resume
+- **panda_web MQTT disconnects** — switched to `loop_forever()` in daemon thread with
+  `reconnect_delay_set(min=2, max=30)` for reliable reconnect handling
+
+### Added
+- **CC2 Chamber tile** in panda_web shows CC2 printer's own chamber temperature sensor
+  alongside the Panda Breath sensor reading
+
 ## [2.0.4] - 2026-05-28
 
 ### Fixed
