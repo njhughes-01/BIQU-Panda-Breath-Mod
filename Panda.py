@@ -54,6 +54,12 @@ DEBUG_TO_FILE = CONFIG["DEBUG_TO_FILE"]
 HYSTERESE = CONFIG["HYSTERESE"]
 # Schutzzeit: Mindestpause (in Sek.) zwischen zwei Schaltvorgängen, um die Hardware zu schonen.
 MIN_SWITCH_TIME = CONFIG["MIN_SWITCH_TIME"]
+# How many °C below the chamber target to resume a paused CC2 print.
+# The heater continues running to reach/maintain the full target during the print.
+# Default 10 = resume when Panda Breath sensor is 10°C below target (e.g. 45°C for ASA 55°C target).
+# Set lower (e.g. 5) for a longer preheat, higher (e.g. 15) for a quicker start.
+PREHEAT_RESUME_OFFSET = float(CONFIG.get("PREHEAT_RESUME_OFFSET",
+                                          os.environ.get("PREHEAT_RESUME_OFFSET", "10")))
 # MQTT Broker Adresse: Die IP-Adresse deines Home Assistant oder MQTT-Servers.
 MQTT_BROKER = CONFIG["MQTT_BROKER"]
 # MQTT Benutzername: In HA unter Einstellungen -> Personen -> Benutzer angelegt.
@@ -1133,8 +1139,8 @@ async def update_limits_from_ws():
                             _target = float(current_data.get("chamber_setpoint", 0))
                             _pb_ist = float(current_data.get("chamber_temp", 0))
                             _cc2_ist_raw = float(current_data.get("cc2_chamber_temp", 0.0))
-                            if _target > 0 and _pb_ist >= (_target - float(HYSTERESE)):
-                                log_event(f"[CC2-SLICER] Chamber at PB:{_pb_ist:.0f}°C CC2:{_cc2_ist_raw:.0f}°C — resuming CC2 print", force_console=True)
+                            if _target > 0 and _pb_ist >= (_target - PREHEAT_RESUME_OFFSET):
+                                log_event(f"[CC2-SLICER] Chamber ready PB:{_pb_ist:.0f}°C CC2:{_cc2_ist_raw:.0f}°C (resume threshold {_target - PREHEAT_RESUME_OFFSET:.0f}°C) — resuming CC2 print", force_console=True)
                                 cc2_paused_for_preheat = False
                                 if current_data.get("cc2_print_status") == "paused":
                                     mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/resume_print/press", "", qos=1)
