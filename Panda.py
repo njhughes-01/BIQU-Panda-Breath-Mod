@@ -59,7 +59,7 @@ MIN_SWITCH_TIME = CONFIG["MIN_SWITCH_TIME"]
 # Default 10 = resume when Panda Breath sensor is 10°C below target (e.g. 45°C for ASA 55°C target).
 # Set lower (e.g. 5) for a longer preheat, higher (e.g. 15) for a quicker start.
 PREHEAT_RESUME_OFFSET = float(CONFIG.get("PREHEAT_RESUME_OFFSET",
-                                          os.environ.get("PREHEAT_RESUME_OFFSET", "10")))
+                                          os.environ.get("PREHEAT_RESUME_OFFSET", "5")))
 # MQTT Broker Adresse: Die IP-Adresse deines Home Assistant oder MQTT-Servers.
 MQTT_BROKER = CONFIG["MQTT_BROKER"]
 # MQTT Benutzername: In HA unter Einstellungen -> Personen -> Benutzer angelegt.
