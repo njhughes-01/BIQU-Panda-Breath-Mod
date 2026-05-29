@@ -1014,6 +1014,11 @@ class _RawWS:
                 await self._w.drain()
             # 0x0A pong, reserved/unknown/fragmented control → silently skip
 
+    async def ping(self) -> None:
+        """Send a WebSocket PING frame — keeps the ESP32 keepalive timer alive."""
+        self._w.write(bytes([0x89, 0]))  # FIN=1, opcode=0x09 (PING), no payload
+        await self._w.drain()
+
     def close(self) -> None:
         try:
             self._w.close()
@@ -1143,10 +1148,12 @@ async def update_limits_from_ws():
                 try:
                     msg = await asyncio.wait_for(websocket.recv(), timeout=10.0)
                 except asyncio.TimeoutError:
-                    # Device went quiet — poll for current settings so temperature
-                    # comparisons and heating logic keep running every ≤10s.
+                    # Device went quiet — poll settings and send a WS PING.
+                    # Original code used ping_interval=20; the ESP32 WS server has
+                    # a keepalive timer that requires periodic PING frames to stay open.
                     try:
                         await websocket.send(json.dumps({"get_settings": 1}))
+                        await websocket.ping()
                     except Exception:
                         pass
                     continue
