@@ -936,6 +936,7 @@ def _on_mqtt_connect(client, userdata, flags, reason_code, properties):
         client.publish(f"{MQTT_TOPIC_PREFIX}/panda_power", "OFF" if power_forced_off else "ON", retain=True)
         client.publish(f"{MQTT_TOPIC_PREFIX}/lock_status", "LOCKED" if global_lock else "UNLOCKED", retain=True)
         client.publish(f"{MQTT_TOPIC_PREFIX}/backend_mode", "CC2" if CC2_IP else "Klipper", retain=True)
+        client.publish(f"{MQTT_TOPIC_PREFIX}/version", PANDA_VERSION, retain=True)
         if global_lock:
             client.publish(f"{MQTT_TOPIC_PREFIX}/panda_modus", "LOCKED", retain=True)
         elif power_forced_off:
