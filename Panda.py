@@ -1044,7 +1044,9 @@ async def _connect_raw_ws(host: str) -> _RawWS:
         buf += chunk
     if b" 101 " not in buf:
         writer.close()
-        raise ConnectionError(f"WS upgrade rejected: {buf[:120]!r}")
+        # Log full response to help diagnose unexpected device responses
+        log_event(f"[WS-HANDSHAKE] Unexpected response from {host}: {buf[:200]!r}", force_console=True)
+        raise ConnectionError(f"WS upgrade rejected: {buf[:80]!r}")
     return _RawWS(reader, writer)
 
 
