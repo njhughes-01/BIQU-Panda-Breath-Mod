@@ -1162,9 +1162,15 @@ async def update_limits_from_ws():
                             _target = float(current_data.get("chamber_setpoint", 0))
                             _pb_ist = float(current_data.get("chamber_temp", 0))
                             _cc2_ist_raw = float(current_data.get("cc2_chamber_temp", 0.0))
-                            _cc2_ready = _cc2_ist_raw >= (_target - CC2_RESUME_OFFSET) if _cc2_ist_raw > 5.0 else False
+                            _cc2_has_data = _cc2_ist_raw > 5.0
+                            if _cc2_has_data:
+                                _cc2_ready = _cc2_ist_raw >= (_target - CC2_RESUME_OFFSET)
+                            else:
+                                # CC2 sensor not reporting — fall back to Panda Breath at real target
+                                _cc2_ready = _pb_ist >= _target
                             if _target > 0 and _cc2_ready:
-                                log_event(f"[CC2-SLICER] Chamber ready PB:{_pb_ist:.0f}°C CC2:{_cc2_ist_raw:.0f}°C (CC2 threshold {_target - CC2_RESUME_OFFSET:.0f}°C) — dropping PB to {_target:.0f}°C and resuming", force_console=True)
+                                _resume_reason = f"CC2:{_cc2_ist_raw:.0f}°C (threshold {_target - CC2_RESUME_OFFSET:.0f}°C)" if _cc2_has_data else f"PB fallback:{_pb_ist:.0f}°C (CC2 sensor unavailable)"
+                                log_event(f"[CC2-SLICER] Chamber ready PB:{_pb_ist:.0f}°C {_resume_reason} — dropping PB to {_target:.0f}°C and resuming", force_console=True)
                                 try:
                                     await panda_send(json.dumps({
                                         "settings": {"work_mode": 2, "work_on": True, "set_temp": int(_target), "isrunning": 1}
