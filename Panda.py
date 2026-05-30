@@ -1179,26 +1179,10 @@ async def update_limits_from_ws():
                         bind_warning_shown = False
                         _ws_bind_time = time.time()
                         log_event(f"[WS] Bind confirmed — Panda {PANDA_IP} connected", force_console=True)
-                        # In CC2 mode force Manual (work_mode=2) immediately —
-                        # the device may retain work_mode=1 from a prior session,
-                        # and in AUTO mode it uses its own Klipper bed-temp logic
-                        # which can't reach CC2's API, so it would block heating.
-                        if CC2_IP and not power_forced_off:
-                            await websocket.send(json.dumps({
-                                "settings": {"work_mode": 2}
-                            }))
-                            log_event("[CC2] Forced work_mode=2 (Manual) on connect", force_console=True)
-                            # Wait for device to process work_mode before sending more commands —
-                            # rapid commands after bind cause ECONNRESET on the ESP32.
-                            await asyncio.sleep(1.5)
-                            # If no active print, clear the device's remembered set_temp so it
-                            # doesn't get picked up as chamber_setpoint on the next recv.
-                            _idle_on_connect = current_data.get("cc2_print_status", "idle") not in {
-                                "printing", "preheating", "paused", "pausing", "resuming", "stopping"
-                            }
-                            if _idle_on_connect:
-                                await websocket.send(json.dumps({"settings": {"set_temp": 0}}))
-                                await asyncio.sleep(0.3)
+                        # NOTE: do NOT send work_mode=2 here. The original code never did.
+                        # Sending commands immediately after bind causes ECONNRESET on the
+                        # ESP32. work_mode=2 is set explicitly when a heat command fires
+                        # (inside _cc2_heat / _cc2_heat_on_start) — it's not needed at idle.
                         # Re-sync heating state after reconnect, but only if there is
                         # an active CC2 print. Stale retained MQTT chamber_setpoint from a
                         # previous session must not trigger heating when the printer is idle.
