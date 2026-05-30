@@ -34,6 +34,7 @@ _last_heat_status = ""
 _last_heat_log_time = 0.0
 bed_sensor_error = False
 bind_confirmed = False
+_ws_bind_time = 0.0  # timestamp of last successful bind; heating suppressed for 5s after
 bind_warning_shown = False
 # --- POWER CONFIRM (gegen ON->OFF "Bounce") ---
 desired_power_state = None           # None / True / False
@@ -1176,6 +1177,7 @@ async def update_limits_from_ws():
                     if not bind_confirmed:
                         bind_confirmed = True
                         bind_warning_shown = False
+                        _ws_bind_time = time.time()
                         log_event(f"[WS] Bind confirmed — Panda {PANDA_IP} connected", force_console=True)
                         # In CC2 mode force Manual (work_mode=2) immediately —
                         # the device may retain work_mode=1 from a prior session,
@@ -1524,6 +1526,13 @@ async def update_limits_from_ws():
                                     log_event(f"[AUTO-OFF-WARN] Panda not connected — cannot stop heating (chamber={ist:.1f}°C)", force_console=True)
                             except Exception as e:
                                 log_event(f"[AUTO-OFF-ERR] chamber={ist:.1f}°C target={target:.1f}°C: {e}", force_console=True)
+
+                    elif (
+                        # Suppress heating for 5s after bind — gives cc2_backend time to
+                        # publish fresh CC2 state that overwrites stale retained MQTT values.
+                        CC2_IP and (time.time() - _ws_bind_time) < 5.0
+                    ):
+                        pass  # grace period: observe state but don't command
 
                     elif (
                         target_state != global_heating_state
