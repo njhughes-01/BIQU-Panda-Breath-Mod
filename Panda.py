@@ -1459,9 +1459,10 @@ async def update_limits_from_ws():
                                 last_switch_time = time.time()
                                 last_stop_command_time = 0
                                 try:
+                                    _effective_target = _preheat_overshoot_temp if (cc2_paused_for_preheat and _preheat_overshoot_temp > 0) else int(target)
                                     heat_cmd: dict = {
                                         "work_on": True,
-                                        "set_temp": int(target),
+                                        "set_temp": _effective_target,
                                         "isrunning": 1
                                     }
                                     if CC2_IP:
