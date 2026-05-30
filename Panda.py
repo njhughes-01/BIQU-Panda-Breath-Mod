@@ -55,12 +55,16 @@ DEBUG_TO_FILE = CONFIG["DEBUG_TO_FILE"]
 HYSTERESE = CONFIG["HYSTERESE"]
 # Schutzzeit: Mindestpause (in Sek.) zwischen zwei Schaltvorgängen, um die Hardware zu schonen.
 MIN_SWITCH_TIME = CONFIG["MIN_SWITCH_TIME"]
-# How many °C below the chamber target to resume a paused CC2 print.
-# The heater continues running to reach/maintain the full target during the print.
-# Default 10 = resume when Panda Breath sensor is 10°C below target (e.g. 45°C for ASA 55°C target).
-# Set lower (e.g. 5) for a longer preheat, higher (e.g. 15) for a quicker start.
-PREHEAT_RESUME_OFFSET = float(CONFIG.get("PREHEAT_RESUME_OFFSET",
-                                          os.environ.get("PREHEAT_RESUME_OFFSET", "5")))
+# How many °C above the filament target to set the Panda Breath during preheat.
+# Overshooting forces faster heat-soak into the CC2 chamber body.
+# Once the CC2 sensor is within CC2_RESUME_OFFSET of target, PB is dropped back to real target.
+# Default 15 = e.g. ASA 55°C → Panda Breath heats to 70°C during warmup.
+PREHEAT_OVERSHOOT_DELTA = float(CONFIG.get("PREHEAT_OVERSHOOT_DELTA",
+                                            os.environ.get("PREHEAT_OVERSHOOT_DELTA", "15")))
+# How many °C below target the CC2 chamber sensor must reach before resuming the paused print.
+# Default 10 = resume when CC2 sensor ≥ target - 10 (e.g. ≥ 45°C for ASA 55°C target).
+CC2_RESUME_OFFSET = float(CONFIG.get("CC2_RESUME_OFFSET",
+                                      os.environ.get("CC2_RESUME_OFFSET", "10")))
 # MQTT Broker Adresse: Die IP-Adresse deines Home Assistant oder MQTT-Servers.
 MQTT_BROKER = CONFIG["MQTT_BROKER"]
 # MQTT Benutzername: In HA unter Einstellungen -> Personen -> Benutzer angelegt.
@@ -346,11 +350,12 @@ def on_mqtt_message(client, userdata, msg):
                         needs_preheat = effective_chamber < (chamber_target - 5) and not cc2_paused_for_preheat
                         async def _cc2_heat_on_start(t=int(chamber_target), pause=needs_preheat):
                             global cc2_paused_for_preheat, global_heating_state
+                            preheat_temp = t + int(PREHEAT_OVERSHOOT_DELTA) if pause else t
                             try:
                                 await panda_send(json.dumps({"settings": {"isrunning": 0}}))
                                 await asyncio.sleep(0.2)
                                 await panda_send(json.dumps({
-                                    "settings": {"work_mode": 2, "work_on": True, "set_temp": t, "isrunning": 1}
+                                    "settings": {"work_mode": 2, "work_on": True, "set_temp": preheat_temp, "isrunning": 1}
                                 }))
                                 await asyncio.sleep(0.3)
                                 await panda_send(json.dumps({"get_settings": 1}))
@@ -359,7 +364,7 @@ def on_mqtt_message(client, userdata, msg):
                                 log_event(f"[CC2-START-HEAT-ERR] {e}", force_console=True)
                                 return
                             if pause and not cc2_paused_for_preheat:
-                                log_event(f"[CC2-SLICER] Chamber cold ({chamber_now:.0f}°C), pausing CC2 until {t}°C reached", force_console=True)
+                                log_event(f"[CC2-SLICER] Chamber cold ({chamber_now:.0f}°C), pausing CC2 — heating to {preheat_temp}°C (overshoot), target {t}°C", force_console=True)
                                 await asyncio.sleep(1.5)
                                 if not cc2_paused_for_preheat:
                                     mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/pause_print/press", "", qos=1)
@@ -415,6 +420,7 @@ def on_mqtt_message(client, userdata, msg):
                     needs_preheat = effective_chamber < (float(target) - 5) and not cc2_paused_for_preheat
                     async def _cc2_heat(t=int(target), pause=needs_preheat):
                         global cc2_paused_for_preheat, global_heating_state
+                        preheat_temp = t + int(PREHEAT_OVERSHOOT_DELTA) if pause else t
                         try:
                             await panda_send(json.dumps({"settings": {"isrunning": 0}}))
                             await asyncio.sleep(0.2)
@@ -422,7 +428,7 @@ def on_mqtt_message(client, userdata, msg):
                                 "settings": {
                                     "work_mode": 2,
                                     "work_on": True,
-                                    "set_temp": t,
+                                    "set_temp": preheat_temp,
                                     "isrunning": 1
                                 }
                             }))
@@ -433,7 +439,7 @@ def on_mqtt_message(client, userdata, msg):
                             log_event(f"[CC2-HEAT-ERR] Failed to send heat command (target={t}°C): {e}", force_console=True)
                             return
                         if pause and not cc2_paused_for_preheat:
-                            log_event(f"[CC2-SLICER] Chamber cold ({chamber_now:.0f}°C), pausing CC2 until {t}°C reached", force_console=True)
+                            log_event(f"[CC2-SLICER] Chamber cold ({chamber_now:.0f}°C), pausing CC2 — heating to {preheat_temp}°C (overshoot), target {t}°C", force_console=True)
                             await asyncio.sleep(1.5)
                             if not cc2_paused_for_preheat:
                                 mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/pause_print/press", "", qos=1)
@@ -1133,17 +1139,23 @@ async def update_limits_from_ws():
                             )
 
                         # Auto-resume CC2 if we paused it waiting for chamber to heat.
-                        # Use min(Panda Breath, CC2 sensor) — but only trust CC2 reading
-                        # Resume uses the Panda Breath sensor — it's the controlling sensor
-                        # for the heater and physically near the heating element. The CC2's
-                        # own chamber sensor is in a different location and reads ~10°C cooler
-                        # due to heat gradient; using min() would prevent resume at target.
+                        # Gate on CC2 chamber sensor — it reflects actual air temp near the print.
+                        # Panda Breath was set to target + PREHEAT_OVERSHOOT_DELTA during warmup
+                        # to accelerate heat soak. Once CC2 is within CC2_RESUME_OFFSET of target,
+                        # drop PB back to real target then resume the print.
                         if cc2_paused_for_preheat:
                             _target = float(current_data.get("chamber_setpoint", 0))
                             _pb_ist = float(current_data.get("chamber_temp", 0))
                             _cc2_ist_raw = float(current_data.get("cc2_chamber_temp", 0.0))
-                            if _target > 0 and _pb_ist >= (_target - PREHEAT_RESUME_OFFSET):
-                                log_event(f"[CC2-SLICER] Chamber ready PB:{_pb_ist:.0f}°C CC2:{_cc2_ist_raw:.0f}°C (resume threshold {_target - PREHEAT_RESUME_OFFSET:.0f}°C) — resuming CC2 print", force_console=True)
+                            _cc2_ready = _cc2_ist_raw >= (_target - CC2_RESUME_OFFSET) if _cc2_ist_raw > 5.0 else False
+                            if _target > 0 and _cc2_ready:
+                                log_event(f"[CC2-SLICER] Chamber ready PB:{_pb_ist:.0f}°C CC2:{_cc2_ist_raw:.0f}°C (CC2 threshold {_target - CC2_RESUME_OFFSET:.0f}°C) — dropping PB to {_target:.0f}°C and resuming", force_console=True)
+                                try:
+                                    await panda_send(json.dumps({
+                                        "settings": {"work_mode": 2, "work_on": True, "set_temp": int(_target), "isrunning": 1}
+                                    }))
+                                except Exception as _e:
+                                    log_event(f"[CC2-SLICER] Drop-to-target error: {_e}", force_console=True)
                                 cc2_paused_for_preheat = False
                                 if current_data.get("cc2_print_status") == "paused":
                                     mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/resume_print/press", "", qos=1)
