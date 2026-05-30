@@ -21,9 +21,12 @@ import time
 
 HOST = sys.argv[1] if len(sys.argv) > 1 else "10.88.88.193"
 SEND_MSG = None
+PORT = 80
 for i, arg in enumerate(sys.argv):
     if arg == "--send" and i + 1 < len(sys.argv):
         SEND_MSG = sys.argv[i + 1]
+    if arg == "--port" and i + 1 < len(sys.argv):
+        PORT = int(sys.argv[i + 1])
 
 
 def hex_dump(data: bytes, label: str = "") -> None:
@@ -36,11 +39,38 @@ def hex_dump(data: bytes, label: str = "") -> None:
         print(f"  {i:04x}  {hex_part:<47}  {ascii_part}")
 
 
+async def scan_ports(host):
+    """Quick scan to find which ports are open."""
+    print(f"Scanning {host} for open ports ...")
+    candidates = [80, 443, 8080, 8888, 8899, 9000]
+    open_ports = []
+    for port in candidates:
+        try:
+            r, w = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=2.0)
+            w.close()
+            open_ports.append(port)
+            print(f"  port {port}: OPEN")
+        except Exception:
+            print(f"  port {port}: closed/timeout")
+    return open_ports
+
+
 async def main():
-    print(f"Connecting to {HOST}:80 ...")
+    # Port scan first
+    open_ports = await scan_ports(HOST)
+    ws_port = PORT
+    if PORT not in open_ports and open_ports:
+        ws_port = open_ports[0]
+        print(f"\nPort {PORT} not reachable, trying {ws_port} instead")
+    elif not open_ports:
+        print(f"\nNo open ports found on {HOST} — device not reachable from this machine")
+        return
+    print()
+
+    print(f"Connecting to {HOST}:{ws_port} ...")
     try:
         reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(HOST, 80), timeout=10.0
+            asyncio.open_connection(HOST, ws_port), timeout=10.0
         )
     except asyncio.TimeoutError:
         print("TCP connect TIMED OUT — device not reachable or port closed")
@@ -53,7 +83,7 @@ async def main():
     key = base64.b64encode(secrets.token_bytes(16)).decode()
     request = (
         f"GET /ws HTTP/1.1\r\n"
-        f"Host: {HOST}\r\n"
+        f"Host: {HOST}:{ws_port}\r\n"
         f"Upgrade: websocket\r\n"
         f"Connection: Upgrade\r\n"
         f"Sec-WebSocket-Key: {key}\r\n"
