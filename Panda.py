@@ -1552,7 +1552,7 @@ async def update_limits_from_ws():
             # Publish status while WS is down so HA MQTT keepalive timer resets every 5s
             # (without this, no data flows to HA during reconnect → keepalive timeout at 60s)
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/status", "Panda Breath offline", retain=True)
-            await asyncio.sleep(5)
+            await asyncio.sleep(10)
 
 async def bind_watchdog():
     global bind_confirmed, bind_warning_shown
