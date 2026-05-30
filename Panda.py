@@ -349,7 +349,16 @@ def on_mqtt_message(client, userdata, msg):
                     if chamber_target > 0 and (panda_ws or panda_writer):
                         chamber_now = safe_float(current_data.get("chamber_temp", 0), 0)
                         cc2_chamber_now = safe_float(current_data.get("cc2_chamber_temp", 0.0), 0.0)
-                        effective_chamber = min(chamber_now, cc2_chamber_now) if cc2_chamber_now > 5.0 else chamber_now
+                        _pb_ok = chamber_now > 1.0
+                        _cc2_ok = cc2_chamber_now > 5.0
+                        if _pb_ok and _cc2_ok:
+                            effective_chamber = min(chamber_now, cc2_chamber_now)
+                        elif _cc2_ok:
+                            effective_chamber = cc2_chamber_now  # PB not ready yet (backend restart)
+                        elif _pb_ok:
+                            effective_chamber = chamber_now
+                        else:
+                            effective_chamber = chamber_target  # no data — assume at temp, skip pause
                         needs_preheat = effective_chamber < (chamber_target - 5) and not cc2_paused_for_preheat
                         async def _cc2_heat_on_start(t=int(chamber_target), pause=needs_preheat):
                             global cc2_paused_for_preheat, global_heating_state, _preheat_overshoot_temp
@@ -424,7 +433,16 @@ def on_mqtt_message(client, userdata, msg):
                 if (panda_ws or panda_writer) and int(target) > 0:
                     chamber_now = safe_float(current_data.get("chamber_temp", 0), 0)
                     cc2_chamber_now = safe_float(current_data.get("cc2_chamber_temp", 0.0), 0.0)
-                    effective_chamber = min(chamber_now, cc2_chamber_now) if cc2_chamber_now > 5.0 else chamber_now
+                    _pb_ok = chamber_now > 1.0
+                    _cc2_ok = cc2_chamber_now > 5.0
+                    if _pb_ok and _cc2_ok:
+                        effective_chamber = min(chamber_now, cc2_chamber_now)
+                    elif _cc2_ok:
+                        effective_chamber = cc2_chamber_now  # PB not ready yet (backend restart)
+                    elif _pb_ok:
+                        effective_chamber = chamber_now
+                    else:
+                        effective_chamber = float(target)  # no data — assume at temp, skip pause
                     # Don't re-pause on MQTT reconnect delivering retained active_filament_type
                     needs_preheat = effective_chamber < (float(target) - 5) and not cc2_paused_for_preheat
                     async def _cc2_heat(t=int(target), pause=needs_preheat):
