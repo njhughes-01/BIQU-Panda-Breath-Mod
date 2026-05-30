@@ -358,7 +358,10 @@ def on_mqtt_message(client, userdata, msg):
                         elif _pb_ok:
                             effective_chamber = chamber_now
                         else:
-                            effective_chamber = chamber_target  # no data — assume at temp, skip pause
+                            # No sensor data yet. If arriving as 'paused' (restart during preheat),
+                            # assume cold — conservative, re-arms preheat. If 'printing', assume
+                            # at temp — avoids false pause on a fresh print before first WS frame.
+                            effective_chamber = 0.0 if new_status == 'paused' else chamber_target
                         needs_preheat = effective_chamber < (chamber_target - 5) and not cc2_paused_for_preheat
                         async def _cc2_heat_on_start(t=int(chamber_target), pause=needs_preheat):
                             global cc2_paused_for_preheat, global_heating_state, _preheat_overshoot_temp
@@ -442,7 +445,8 @@ def on_mqtt_message(client, userdata, msg):
                     elif _pb_ok:
                         effective_chamber = chamber_now
                     else:
-                        effective_chamber = float(target)  # no data — assume at temp, skip pause
+                        _cur_cc2_status = current_data.get("cc2_print_status", "idle")
+                        effective_chamber = 0.0 if _cur_cc2_status in ('paused', 'pausing') else float(target)
                     # Don't re-pause on MQTT reconnect delivering retained active_filament_type
                     needs_preheat = effective_chamber < (float(target) - 5) and not cc2_paused_for_preheat
                     async def _cc2_heat(t=int(target), pause=needs_preheat):
@@ -1034,6 +1038,7 @@ async def update_limits_from_ws():
     global last_live_log_state, last_live_log_time
     global last_stop_command_time, cc2_paused_for_preheat, _preheat_overshoot_temp
     global _last_heat_status, _last_heat_log_time
+    global _ws_bind_time
     uri = f"ws://{PANDA_IP}/ws"
 
     while True:
@@ -1195,12 +1200,19 @@ async def update_limits_from_ws():
                                     }))
                                 except Exception as _e:
                                     log_event(f"[CC2-SLICER] Drop-to-target error: {_e}", force_console=True)
-                                cc2_paused_for_preheat = False
-                                _preheat_overshoot_temp = 0
-                                if current_data.get("cc2_print_status") == "paused":
+                                _cc2_status_now = current_data.get("cc2_print_status", "")
+                                if _cc2_status_now in ("paused", "pausing"):
+                                    cc2_paused_for_preheat = False
+                                    _preheat_overshoot_temp = 0
                                     mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/resume_print/press", "", qos=1)
+                                elif _cc2_status_now in ("printing", "resuming"):
+                                    # User already resumed manually — clear preheat state, no-op
+                                    cc2_paused_for_preheat = False
+                                    _preheat_overshoot_temp = 0
+                                    log_event(f"[CC2-SLICER] Chamber ready, CC2 already {_cc2_status_now} — clearing preheat state", force_console=True)
                                 else:
-                                    log_event(f"[CC2-SLICER] CC2 not paused (status={current_data.get('cc2_print_status')!r}), skip resume", force_console=True)
+                                    # Transient state (stopping, initializing, etc.) — keep flag, retry next cycle
+                                    log_event(f"[CC2-SLICER] Chamber ready but CC2 status={_cc2_status_now!r} — retrying next cycle", force_console=True)
 
                         # CC2 mode: bed_temp updated via MQTT subscription
                         # Traditional mode: fetch from HA REST API
