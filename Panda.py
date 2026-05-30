@@ -286,6 +286,7 @@ def on_mqtt_message(client, userdata, msg):
     global desired_power_state
     global power_pending_until
     global cc2_paused_for_preheat
+    global _preheat_overshoot_temp
     global global_heating_state
     global _discovery_published
 
@@ -324,6 +325,7 @@ def on_mqtt_message(client, userdata, msg):
                     log_event(f"[CC2-SLICER] Print ended ({prev_status}→{new_status}), turning off chamber heater", force_console=True)
                     if cc2_paused_for_preheat:
                         cc2_paused_for_preheat = False
+                        _preheat_overshoot_temp = 0
                     async def _cc2_off():
                         try:
                             await panda_send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "set_temp": 0}}))
@@ -487,6 +489,7 @@ def on_mqtt_message(client, userdata, msg):
         power_forced_off = False
         if cc2_paused_for_preheat:
             cc2_paused_for_preheat = False
+            _preheat_overshoot_temp = 0
             mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/resume_print/press", "", qos=1)
             log_event("[CC2] Resuming CC2 after unlock", force_console=True)
 
@@ -579,6 +582,7 @@ def on_mqtt_message(client, userdata, msg):
         global_heating_state = RELAY_OFF  # 🔥 FIX: Heizung SOFORT logisch ausschalten
         if cc2_paused_for_preheat:
             cc2_paused_for_preheat = False
+            _preheat_overshoot_temp = 0
             mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/resume_print/press", "", qos=1)
             log_event("[CC2] Resuming CC2 before emergency stop", force_console=True)
 
@@ -741,6 +745,7 @@ def on_mqtt_message(client, userdata, msg):
             power_forced_off = True
             if cc2_paused_for_preheat:
                 cc2_paused_for_preheat = False
+                _preheat_overshoot_temp = 0
                 mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/resume_print/press", "", qos=1)
                 log_event("[CC2] Resuming CC2 before heater power off", force_console=True)
 
