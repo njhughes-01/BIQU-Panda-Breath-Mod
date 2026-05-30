@@ -1189,6 +1189,14 @@ async def update_limits_from_ws():
                             # Wait for device to process work_mode before sending more commands —
                             # rapid commands after bind cause ECONNRESET on the ESP32.
                             await asyncio.sleep(1.5)
+                            # If no active print, clear the device's remembered set_temp so it
+                            # doesn't get picked up as chamber_setpoint on the next recv.
+                            _idle_on_connect = current_data.get("cc2_print_status", "idle") not in {
+                                "printing", "preheating", "paused", "pausing", "resuming", "stopping"
+                            }
+                            if _idle_on_connect:
+                                await websocket.send(json.dumps({"settings": {"set_temp": 0}}))
+                                await asyncio.sleep(0.3)
                         # Re-sync heating state after reconnect, but only if there is
                         # an active CC2 print. Stale retained MQTT chamber_setpoint from a
                         # previous session must not trigger heating when the printer is idle.
@@ -1285,7 +1293,16 @@ async def update_limits_from_ws():
                         ws_work_mode = int(s.get("work_mode", 0) or 0)
                         ws_work_on = s.get("work_on") in (1, True, "1")
 
-                        if slicer_active:
+                        # In CC2 mode, don't sync the device's remembered set_temp into
+                        # chamber_setpoint when there is no active print. The device retains
+                        # the last set_temp across reboots; picking it up at idle would trigger
+                        # heating immediately after every WS connect (ECONNRESET loop).
+                        _cc2_active_now = CC2_IP and current_data.get("cc2_print_status", "idle") in {
+                            "printing", "preheating", "paused", "pausing", "resuming", "stopping"
+                        }
+                        if CC2_IP and not _cc2_active_now:
+                            pass  # skip set_temp sync when idle in CC2 mode
+                        elif slicer_active:
                             if ws_temp > 0:
                                 current_data["chamber_setpoint"] = ws_temp
                                 mqtt_client.publish(
