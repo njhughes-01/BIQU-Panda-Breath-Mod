@@ -162,6 +162,7 @@ panda_ws = None
 panda_writer = None  # asyncio StreamWriter from v1.0.3 TLS path
 main_loop = None
 cc2_paused_for_preheat = False  # True when we paused the CC2 to wait for chamber temp
+_preheat_overshoot_temp = 0    # set_temp sent to Panda Breath during preheat (target + overshoot delta)
 terminal_cleared = False
 # Merkt sich den letzten vollständigen WS-Settings-Stand
 last_ws_settings = {}
@@ -349,7 +350,11 @@ def on_mqtt_message(client, userdata, msg):
                         effective_chamber = min(chamber_now, cc2_chamber_now) if cc2_chamber_now > 5.0 else chamber_now
                         needs_preheat = effective_chamber < (chamber_target - 5) and not cc2_paused_for_preheat
                         async def _cc2_heat_on_start(t=int(chamber_target), pause=needs_preheat):
-                            global cc2_paused_for_preheat, global_heating_state
+                            global cc2_paused_for_preheat, global_heating_state, _preheat_overshoot_temp
+                            if cc2_paused_for_preheat:
+                                # Preheat already in progress (overshoot active) — don't override
+                                log_event(f"[CC2-SLICER] Preheat already active ({_preheat_overshoot_temp}°C overshoot) — skipping redundant heat command", force_console=True)
+                                return
                             preheat_temp = t + int(PREHEAT_OVERSHOOT_DELTA) if pause else t
                             try:
                                 await panda_send(json.dumps({"settings": {"isrunning": 0}}))
@@ -360,6 +365,8 @@ def on_mqtt_message(client, userdata, msg):
                                 await asyncio.sleep(0.3)
                                 await panda_send(json.dumps({"get_settings": 1}))
                                 global_heating_state = RELAY_ON
+                                if pause:
+                                    _preheat_overshoot_temp = preheat_temp
                             except Exception as e:
                                 log_event(f"[CC2-START-HEAT-ERR] {e}", force_console=True)
                                 return
@@ -419,7 +426,7 @@ def on_mqtt_message(client, userdata, msg):
                     # Don't re-pause on MQTT reconnect delivering retained active_filament_type
                     needs_preheat = effective_chamber < (float(target) - 5) and not cc2_paused_for_preheat
                     async def _cc2_heat(t=int(target), pause=needs_preheat):
-                        global cc2_paused_for_preheat, global_heating_state
+                        global cc2_paused_for_preheat, global_heating_state, _preheat_overshoot_temp
                         preheat_temp = t + int(PREHEAT_OVERSHOOT_DELTA) if pause else t
                         try:
                             await panda_send(json.dumps({"settings": {"isrunning": 0}}))
@@ -435,6 +442,8 @@ def on_mqtt_message(client, userdata, msg):
                             await asyncio.sleep(0.3)
                             await panda_send(json.dumps({"get_settings": 1}))
                             global_heating_state = RELAY_ON  # update immediately; GUI shows ON without waiting for WS confirm
+                            if pause:
+                                _preheat_overshoot_temp = preheat_temp
                         except Exception as e:
                             log_event(f"[CC2-HEAT-ERR] Failed to send heat command (target={t}°C): {e}", force_console=True)
                             return
@@ -1000,7 +1009,7 @@ async def update_limits_from_ws():
     global panda_ws, bind_confirmed, bind_warning_shown
     global global_heating_state, last_switch_time
     global last_live_log_state, last_live_log_time
-    global last_stop_command_time, cc2_paused_for_preheat
+    global last_stop_command_time, cc2_paused_for_preheat, _preheat_overshoot_temp
     global _last_heat_status, _last_heat_log_time
     uri = f"ws://{PANDA_IP}/ws"
 
@@ -1101,12 +1110,13 @@ async def update_limits_from_ws():
                                 "printing", "preheating", "paused", "pausing", "resuming", "stopping"
                             }
                             if chamber_target > 0 and not power_forced_off and not global_lock and _reconnect_printing:
-                                log_event(f"[WS-RECONNECT] Resuming heat to {chamber_target:.0f}°C after WS reconnect", force_console=True)
+                                _reconnect_temp = _preheat_overshoot_temp if (cc2_paused_for_preheat and _preheat_overshoot_temp > 0) else int(chamber_target)
+                                log_event(f"[WS-RECONNECT] Resuming heat to {_reconnect_temp}°C after WS reconnect{'  (overshoot active)' if _reconnect_temp != int(chamber_target) else ''}", force_console=True)
                                 await websocket.send(json.dumps({
                                     "settings": {
                                         "work_mode": 2,
                                         "work_on": True,
-                                        "set_temp": int(chamber_target),
+                                        "set_temp": _reconnect_temp,
                                         "isrunning": 1
                                     }
                                 }))
@@ -1157,6 +1167,7 @@ async def update_limits_from_ws():
                                 except Exception as _e:
                                     log_event(f"[CC2-SLICER] Drop-to-target error: {_e}", force_console=True)
                                 cc2_paused_for_preheat = False
+                                _preheat_overshoot_temp = 0
                                 if current_data.get("cc2_print_status") == "paused":
                                     mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/resume_print/press", "", qos=1)
                                 else:
