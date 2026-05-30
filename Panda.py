@@ -937,6 +937,12 @@ def _on_mqtt_connect(client, userdata, flags, reason_code, properties):
         client.publish(f"{MQTT_TOPIC_PREFIX}/lock_status", "LOCKED" if global_lock else "UNLOCKED", retain=True)
         client.publish(f"{MQTT_TOPIC_PREFIX}/backend_mode", "CC2" if CC2_IP else "Klipper", retain=True)
         client.publish(f"{MQTT_TOPIC_PREFIX}/version", PANDA_VERSION, retain=True)
+        # Reset volatile CC2 print state so stale retained MQTT messages from a prior session
+        # don't trigger immediate heating on the next WS connect. Fresh data from cc2_backend
+        # will arrive within seconds and overwrite these.
+        if CC2_IP:
+            current_data["cc2_print_status"] = "idle"
+            current_data["chamber_setpoint"] = 0.0
         if global_lock:
             client.publish(f"{MQTT_TOPIC_PREFIX}/panda_modus", "LOCKED", retain=True)
         elif power_forced_off:
@@ -1182,7 +1188,7 @@ async def update_limits_from_ws():
                             log_event("[CC2] Forced work_mode=2 (Manual) on connect", force_console=True)
                             # Wait for device to process work_mode before sending more commands —
                             # rapid commands after bind cause ECONNRESET on the ESP32.
-                            await asyncio.sleep(1.0)
+                            await asyncio.sleep(1.5)
                         # Re-sync heating state after reconnect, but only if there is
                         # an active CC2 print. Stale retained MQTT chamber_setpoint from a
                         # previous session must not trigger heating when the printer is idle.
