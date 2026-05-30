@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import asyncio, ssl, json, time, requests, websockets, os, socket, threading
-import base64, secrets
 import logging
 import paho.mqtt.client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
@@ -972,95 +971,6 @@ else:
     log_event(f"[CONFIG] Traditional mode — PRINTER_IP={PRINTER_IP}", force_console=True)
     
 
-class _RawWS:
-    """
-    Minimal WebSocket client tolerant of ESP32 firmware quirks.
-
-    The Panda Breath runs an ESP32 WS server that occasionally sends
-    fragmented control frames and unknown opcodes — both are spec violations
-    that Python's strict `websockets` library rejects with a 1002 close,
-    causing a reconnect storm.  This class skips spec enforcement: unknown
-    opcodes and fragmented control frames are silently discarded; inbound
-    pings are auto-ponged.  The send/recv interface is identical to
-    websockets.WebSocketClientProtocol so the rest of the code is unchanged.
-    """
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        self._r = reader
-        self._w = writer
-
-    async def send(self, msg: str) -> None:
-        data = msg.encode()
-        n = len(data)
-        if n < 126:
-            self._w.write(bytes([0x81, n]) + data)
-        elif n < 65536:
-            self._w.write(bytes([0x81, 126, n >> 8, n & 0xFF]) + data)
-        else:
-            self._w.write(bytes([0x81, 127]) + n.to_bytes(8, 'big') + data)
-        await self._w.drain()
-
-    async def recv(self) -> str:
-        while True:
-            hdr = await self._r.readexactly(2)
-            opcode = hdr[0] & 0x0F
-            masked = bool(hdr[1] & 0x80)
-            n = hdr[1] & 0x7F
-            if n == 126:
-                n = int.from_bytes(await self._r.readexactly(2), 'big')
-            elif n == 127:
-                n = int.from_bytes(await self._r.readexactly(8), 'big')
-            mask = (await self._r.readexactly(4)) if masked else b''
-            payload = (await self._r.readexactly(n)) if n else b''
-            if masked and mask:
-                payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
-            if opcode in (0x00, 0x01, 0x02):        # continuation / text / binary
-                return payload.decode(errors='replace')
-            if opcode == 0x08:                       # close frame
-                raise ConnectionError("WS close frame received from device")
-            if opcode == 0x09:                       # ping → pong
-                self._w.write(bytes([0x8A, 0]))
-                await self._w.drain()
-            # 0x0A pong, reserved/unknown/fragmented control → silently skip
-
-    async def ping(self) -> None:
-        """Send a WebSocket PING frame — keeps the ESP32 keepalive timer alive."""
-        self._w.write(bytes([0x89, 0]))  # FIN=1, opcode=0x09 (PING), no payload
-        await self._w.drain()
-
-    def close(self) -> None:
-        try:
-            self._w.close()
-        except Exception:
-            pass
-
-
-async def _connect_raw_ws(host: str) -> _RawWS:
-    """Open a plain TCP connection to host:80 and perform the WS upgrade handshake."""
-    reader, writer = await asyncio.wait_for(asyncio.open_connection(host, 80), timeout=5.0)
-    key = base64.b64encode(secrets.token_bytes(16)).decode()
-    writer.write(
-        f"GET /ws HTTP/1.1\r\n"
-        f"Host: {host}\r\n"
-        f"Upgrade: websocket\r\n"
-        f"Connection: Upgrade\r\n"
-        f"Sec-WebSocket-Key: {key}\r\n"
-        f"Sec-WebSocket-Version: 13\r\n"
-        f"\r\n".encode()
-    )
-    await writer.drain()
-    buf = b""
-    while b"\r\n\r\n" not in buf:
-        chunk = await asyncio.wait_for(reader.read(4096), timeout=5.0)
-        if not chunk:
-            writer.close()
-            raise ConnectionError("Server closed connection during WS handshake")
-        buf += chunk
-    if b" 101 " not in buf:
-        writer.close()
-        # Log full response to help diagnose unexpected device responses
-        log_event(f"[WS-HANDSHAKE] Unexpected response from {host}: {buf[:200]!r}", force_console=True)
-        raise ConnectionError(f"WS upgrade rejected: {buf[:80]!r}")
-    return _RawWS(reader, writer)
 
 
 async def panda_send(payload: str) -> None:
@@ -1094,8 +1004,7 @@ async def update_limits_from_ws():
         if global_lock:
 
             try:
-                ws = await _connect_raw_ws(PANDA_IP)
-                try:
+                async with websockets.connect(f"ws://{PANDA_IP}/ws", ping_interval=20, ping_timeout=None, close_timeout=1) as ws:
                     await ws.send(json.dumps({
                         "printer": {
                             "ip": HOST_IP,
@@ -1116,8 +1025,6 @@ async def update_limits_from_ws():
                     }))
 
                     await asyncio.sleep(0.5)
-                finally:
-                    ws.close()
 
             except Exception as e:
                 log_event(f"[LOCK STOP ERROR] {e}")
@@ -1127,12 +1034,11 @@ async def update_limits_from_ws():
             continue
 
         # ===== NORMALER WS BETRIEB =====
-        websocket = None
         try:
-            websocket = await _connect_raw_ws(PANDA_IP)
+            async with websockets.connect(uri, ping_interval=20, ping_timeout=None, close_timeout=1, open_timeout=10) as websocket:
 
-            log_event(f"[WS] Connected to Panda {PANDA_IP}")
-            panda_ws = websocket
+                log_event(f"[WS] Connected to Panda {PANDA_IP}")
+                panda_ws = websocket
 
             # Nur binden wenn NICHT power_forced_off
             if not power_forced_off:
@@ -1156,12 +1062,10 @@ async def update_limits_from_ws():
                 try:
                     msg = await asyncio.wait_for(websocket.recv(), timeout=10.0)
                 except asyncio.TimeoutError:
-                    # Device went quiet — poll settings and send a WS PING.
-                    # Original code used ping_interval=20; the ESP32 WS server has
-                    # a keepalive timer that requires periodic PING frames to stay open.
+                    # Device went quiet — poll for current settings so temperature
+                    # comparisons and heating logic keep running every ≤10s.
                     try:
                         await websocket.send(json.dumps({"get_settings": 1}))
-                        await websocket.ping()
                     except Exception:
                         pass
                     continue
@@ -1641,8 +1545,6 @@ async def update_limits_from_ws():
             if "no close frame received or sent" not in err:
                 log_event(f"[WS] Connection error ({PANDA_IP}): {err}", force_console=True)
 
-            if websocket is not None:
-                websocket.close()
             panda_ws = None
             bind_confirmed = False  # Force work_mode=2 re-sync on next connect
             global_heating_state = RELAY_OFF  # Clear stale state so HA doesn't show Heat=ON while offline
