@@ -1035,7 +1035,7 @@ async def update_limits_from_ws():
 
         # ===== NORMALER WS BETRIEB =====
         try:
-            async with websockets.connect(uri, ping_interval=20, ping_timeout=None, close_timeout=1, open_timeout=10) as websocket:
+            async with websockets.connect(uri, ping_interval=None, ping_timeout=None, close_timeout=1, open_timeout=10) as websocket:
 
                 log_event(f"[WS] Connected to Panda {PANDA_IP}")
                 panda_ws = websocket
