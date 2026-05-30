@@ -1180,9 +1180,12 @@ async def update_limits_from_ws():
                                 "settings": {"work_mode": 2}
                             }))
                             log_event("[CC2] Forced work_mode=2 (Manual) on connect", force_console=True)
-                            await asyncio.sleep(0.2)
-                        # Re-sync heating state after reconnect — if heater was
-                        # supposed to be on before WS dropped, re-send the command.
+                            # Wait for device to process work_mode before sending more commands —
+                            # rapid commands after bind cause ECONNRESET on the ESP32.
+                            await asyncio.sleep(1.0)
+                        # Re-sync heating state after reconnect, but only if there is
+                        # an active CC2 print. Stale retained MQTT chamber_setpoint from a
+                        # previous session must not trigger heating when the printer is idle.
                         chamber_target = float(current_data.get("chamber_setpoint", 0))
                         _reconnect_printing = (not CC2_IP) or current_data.get("cc2_print_status", "idle") in {
                             "printing", "preheating", "paused", "pausing", "resuming", "stopping"
