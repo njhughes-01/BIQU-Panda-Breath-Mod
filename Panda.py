@@ -1946,7 +1946,7 @@ def _discover_ha_cc2_entities() -> dict:
             found["print_status"] = eid
         if "print_progress" not in found and domain == "sensor" and "progress" in label:
             found["print_progress"] = eid
-        if "active_filament_type" not in found and domain == "sensor" and any(k in label for k in ("filament", "material")):
+        if "active_filament_type" not in found and domain == "sensor" and any(k in label for k in ("filament", "material")) and "color" not in label:
             found["active_filament_type"] = eid
         if "filename" not in found and domain == "sensor" and any(k in label for k in ("filename", "current_file", "print_file")):
             found["filename"] = eid
