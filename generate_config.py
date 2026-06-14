@@ -28,6 +28,7 @@ def generate_config(env=None):
         "HA_TOKEN": env.get("HA_TOKEN", ""),
         "PRINTER_IP": env.get("PANDA_IP", ""),
         "CC2_IP": env.get("CC2_IP", ""),
+        "CC2_HA_MODE": env.get("CC2_HA_MODE", ""),
         "CC2_TOPIC_PREFIX": env.get("CC2_TOPIC_PREFIX", "cc2"),
         "MQTT_PORT": int(env.get("HA_MQTT_PORT", 1883)),
     }
