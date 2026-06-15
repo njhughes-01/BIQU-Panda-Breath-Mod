@@ -62,9 +62,10 @@ MIN_SWITCH_TIME = CONFIG["MIN_SWITCH_TIME"]
 PREHEAT_OVERSHOOT_DELTA = float(CONFIG.get("PREHEAT_OVERSHOOT_DELTA",
                                             os.environ.get("PREHEAT_OVERSHOOT_DELTA", "15")))
 # How many °C below target the CC2 chamber sensor must reach before resuming the paused print.
-# Default 10 = resume when CC2 sensor ≥ target - 10 (e.g. ≥ 45°C for ASA 55°C target).
+# Default 5 = resume when CC2 sensor ≥ target - 5 (e.g. ≥ 50°C for ASA 55°C target).
+# CC2 box_temp is the authoritative chamber reading; PB sensor is near the heater and runs hotter.
 CC2_RESUME_OFFSET = float(CONFIG.get("CC2_RESUME_OFFSET",
-                                      os.environ.get("CC2_RESUME_OFFSET", "10")))
+                                      os.environ.get("CC2_RESUME_OFFSET", "5")))
 # MQTT Broker Adresse: Die IP-Adresse deines Home Assistant oder MQTT-Servers.
 MQTT_BROKER = CONFIG["MQTT_BROKER"]
 # MQTT Benutzername: In HA unter Einstellungen -> Personen -> Benutzer angelegt.
@@ -329,10 +330,10 @@ def _handle_cc2_data(cc2_key, val):
                 cc2_chamber_now = safe_float(current_data.get("cc2_chamber_temp", 0.0), 0.0)
                 _pb_ok = chamber_now > 1.0
                 _cc2_ok = cc2_chamber_now > 5.0
-                if _pb_ok and _cc2_ok:
-                    effective_chamber = min(chamber_now, cc2_chamber_now)
-                elif _cc2_ok:
-                    effective_chamber = cc2_chamber_now  # PB not ready yet (backend restart)
+                # CC2 box_temp is authoritative for the chamber ambient (PB sensor is near the
+                # heater element and runs hotter than the actual print environment).
+                if _cc2_ok:
+                    effective_chamber = cc2_chamber_now
                 elif _pb_ok:
                     effective_chamber = chamber_now
                 else:
@@ -381,9 +382,7 @@ def _handle_cc2_data(cc2_key, val):
             cc2_chamber_now = safe_float(current_data.get("cc2_chamber_temp", 0.0), 0.0)
             _pb_ok = chamber_now > 1.0
             _cc2_ok = cc2_chamber_now > 5.0
-            if _pb_ok and _cc2_ok:
-                _eff = min(chamber_now, cc2_chamber_now)
-            elif _cc2_ok:
+            if _cc2_ok:
                 _eff = cc2_chamber_now
             elif _pb_ok:
                 _eff = chamber_now
@@ -435,10 +434,8 @@ def _handle_cc2_data(cc2_key, val):
             cc2_chamber_now = safe_float(current_data.get("cc2_chamber_temp", 0.0), 0.0)
             _pb_ok = chamber_now > 1.0
             _cc2_ok = cc2_chamber_now > 5.0
-            if _pb_ok and _cc2_ok:
-                effective_chamber = min(chamber_now, cc2_chamber_now)
-            elif _cc2_ok:
-                effective_chamber = cc2_chamber_now  # PB not ready yet (backend restart)
+            if _cc2_ok:
+                effective_chamber = cc2_chamber_now
             elif _pb_ok:
                 effective_chamber = chamber_now
             else:
@@ -1242,11 +1239,8 @@ async def update_limits_from_ws():
                             _cc2_ist_raw = float(current_data.get("cc2_chamber_temp", 0.0))
                             _cc2_has_data = _cc2_ist_raw > 5.0
                             _pb_ok = _pb_ist > 1.0
-                            # Use same effective-chamber logic as needs_preheat:
-                            # both sensors → min() so the colder one gates the resume
-                            if _cc2_has_data and _pb_ok:
-                                _effective_ist = min(_pb_ist, _cc2_ist_raw)
-                            elif _cc2_has_data:
+                            # CC2 box_temp is authoritative (PB sensor runs hotter near heater)
+                            if _cc2_has_data:
                                 _effective_ist = _cc2_ist_raw
                             elif _pb_ok:
                                 _effective_ist = _pb_ist
