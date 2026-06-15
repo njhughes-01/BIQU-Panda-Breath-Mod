@@ -1498,10 +1498,15 @@ async def update_limits_from_ws():
                             elif ist < (target - HYSTERESE):
                                 target_state, info = RELAY_ON, "Heating..."
                             elif CC2_ACTIVE and _cc2_printing and target > 0:
-                                # At temperature with active print — keep device ON so its internal
-                                # PID maintains the setpoint. Sending work_on=False here would kill
-                                # the temperature control loop; let the device cycle autonomously.
-                                target_state, info = RELAY_ON, "At Temperature"
+                                _cc2_now = float(current_data.get("cc2_chamber_temp", 0.0))
+                                if _cc2_now > 5.0 and _cc2_now < (target - 5):
+                                    # PB at setpoint but CC2 chamber still more than 5°C cold —
+                                    # keep heater running until chamber catches up.
+                                    target_state, info = RELAY_ON, "CC2 Warming..."
+                                else:
+                                    # Both sensors satisfied — keep device ON so its internal
+                                    # PID maintains the setpoint autonomously.
+                                    target_state, info = RELAY_ON, "At Temperature"
                             else:
                                 target_state, info = RELAY_OFF, "At Temperature"
 
@@ -1591,14 +1596,28 @@ async def update_limits_from_ws():
                                     f"(threshold {target - HYSTERESE:.0f}°C) — heater starting",
                                     force_console=True
                                 )
-                            elif _last_heat_status == "Heating..." and info == "At Temperature":
+                            elif info == "CC2 Warming...":
+                                _cc2_log = float(current_data.get("cc2_chamber_temp", 0.0))
                                 log_event(
-                                    f"[HEAT-OFF] Chamber {ist:.0f}°C reached target {target:.0f}°C — heater off",
+                                    f"[CC2-HEAT] PB:{ist:.0f}°C at setpoint but CC2:{_cc2_log:.0f}°C still cold "
+                                    f"(target {target:.0f}°C) — keeping heater on",
                                     force_console=True
                                 )
+                            elif _last_heat_status == "Heating..." and info == "At Temperature":
+                                if CC2_ACTIVE and _cc2_printing:
+                                    _cc2_log = float(current_data.get("cc2_chamber_temp", 0.0))
+                                    log_event(
+                                        f"[AT-TEMP] PB:{ist:.0f}°C CC2:{_cc2_log:.0f}°C target {target:.0f}°C — heater holding",
+                                        force_console=True
+                                    )
+                                else:
+                                    log_event(
+                                        f"[HEAT-OFF] Chamber {ist:.0f}°C reached target {target:.0f}°C — heater off",
+                                        force_console=True
+                                    )
                             elif info == "Idle":
                                 log_event("[IDLE] No active CC2 print — heater standby", force_console=True)
-                            elif info == "At Temperature" and _last_heat_status not in ("Heating...", ""):
+                            elif info == "At Temperature" and _last_heat_status not in ("Heating...", "CC2 Warming...", ""):
                                 log_event(
                                     f"[AT-TEMP] Chamber {ist:.0f}/{target:.0f}°C — within hysteresis, holding",
                                     force_console=True
