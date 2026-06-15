@@ -1,21 +1,28 @@
-# CC2 full stack — Panda backend + web UI + Elegoo Centauri Carbon 2 backend.
-# Use this file on its own when running the CC2 variant (Portainer, single-file curl, etc.)
+# CC2 full stack — Panda backend + web UI + optional cc2_connector for Elegoo Centauri Carbon 2.
 #
-# Usage:
-#   docker compose -f docker-compose.cc2.yml up -d
+# Two sub-options — choose ONE:
 #
-# Or in Portainer: use this file's URL directly as the compose file.
+#   Sub-option A: cc2_connector (direct CC2 MQTT bridge, no HA integration required)
+#   ─────────────────────────────────────────────────────────────────────────────────
+#   Set CC2_IP + CC2_SN in .env.  The cc2_backend container bridges the CC2's internal
+#   MQTT broker into Home Assistant.  Start with the cc2-connector profile:
 #
-# Requirements:
-#   - CC2_IP and CC2_SN must be set in .env or as stack environment variables.
-#   - LAN-only mode must be enabled on the CC2 printer:
-#       Settings -> Network -> LAN Only Mode -> Enable
+#     docker compose --profile cc2-connector up -d
+#
+#   Requirements: CC2 must be in LAN-only mode (Settings → Network → LAN Only Mode → Enable)
+#
+#   Sub-option B: elegoo-homeassistant (read CC2 data via HA REST API)
+#   ─────────────────────────────────────────────────────────────────────────────────
+#   Set CC2_HA_MODE=true + HA_TOKEN in .env.  Requires the
+#   danielcherubini/elegoo-homeassistant HA integration already installed and
+#   exposing CC2 sensors.  No cc2_connector container needed.
+#
+#     docker compose up -d
 #
 # IOT network mode (macvlan):
-#   Containers get real IPs on your IoT LAN (10.88.88.0/24), same subnet as the CC2 and Panda Breath.
-#   Set PANDA_BACKEND_IP to a free static IP on that subnet (e.g. 10.88.88.50).
-#   Set PANDA_HOST_IP to the same value so the Panda Touch can reach port 8883 directly.
-#   Requires an external Docker macvlan network named "IOT" already created on the host.
+#   Containers get real IPs on your IoT LAN (e.g. 10.88.88.0/24), same subnet as
+#   the CC2 and Panda Breath.  Set PANDA_BACKEND_IP to a free static IP on that
+#   subnet.  Requires an external Docker macvlan network named "IOT" on the host.
 
 services:
   panda_backend:
@@ -24,9 +31,6 @@ services:
     image: ghcr.io/njhughes-01/biqu-panda-breath-mod:latest
     command: python3 Panda.py
     restart: unless-stopped
-    depends_on:
-      cc2_backend:
-        condition: service_healthy
     networks:
       IOT:
         ipv4_address: ${PANDA_BACKEND_IP:-}
@@ -74,7 +78,11 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # cc2_backend is only needed for Sub-option A (direct CC2 MQTT bridge).
+  # Start with: docker compose --profile cc2-connector up -d
+  # If using CC2_HA_MODE (Sub-option B), omit the --profile flag — this service will not start.
   cc2_backend:
+    profiles: [cc2-connector]
     container_name: cc2_backend
     # To pin to a specific release: image: ghcr.io/njhughes-01/biqu-panda-breath-mod:2.0.0
     image: ghcr.io/njhughes-01/biqu-panda-breath-mod:latest

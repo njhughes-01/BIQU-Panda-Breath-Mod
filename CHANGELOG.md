@@ -3,6 +3,50 @@
 All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [2.1.0] - 2026-06-15
+
+### Added
+- **CC2_HA_MODE** — new alternative to cc2_connector for users who already have
+  `danielcherubini/elegoo-homeassistant` installed. Set `CC2_HA_MODE=true` to skip the
+  cc2_backend container entirely; the Panda backend reads all CC2 sensor data via the HA
+  REST API (`/api/states`) and controls pause/resume via HA button entities
+- **Auto-discovery of elegoo-homeassistant entities** — on startup the backend queries
+  `/api/states`, filters to Elegoo/CC2/Centauri entities, and maps them to the required
+  keys (chamber_temp, print_status, print_progress, filename, pause/resume buttons).
+  Entity overrides available via `HA_CC2_*_ENTITY` env vars if naming differs
+- **AMS slot color cross-reference for active filament type** — elegoo-homeassistant exposes
+  per-slot colors (a1–a4) rather than a single active-filament entity. The backend compares
+  `active_filament_color` against slot colors to resolve the active filament name (e.g. "ASA")
+- **CC2 Warming state** — during an active CC2 print, if the Panda Breath (PB) sensor reaches
+  setpoint but the CC2 box_temp is still more than 5°C below target, the backend now keeps the
+  heater running and logs `[CC2-HEAT]` until CC2 catches up
+- **`PANDA_MAX_TEMP = 60.0`** — explicit constant for the Panda Breath hardware safety cap;
+  preheat setpoints are clamped at 60°C so log messages are accurate
+- **Docker Compose profile for cc2_backend** — `cc2_backend` now has `profiles: [cc2-connector]`.
+  Sub-option A users: `docker compose --profile cc2-connector up -d`.
+  Sub-option B (CC2_HA_MODE) users: `docker compose up -d` — cc2_backend is not started at all,
+  eliminating the previous `depends_on` deadlock when CC2_IP was not set
+
+### Fixed
+- **Entity discovery for elegoo-homeassistant naming conventions** — corrected discovery patterns:
+  `box_temp` → chamber_temp (not "chamber"), `percent_complete` → print_progress,
+  `file_name` → filename, filament type via slot color cross-reference instead of single entity
+- **False "chamber ready" on hot CC2 at print start** — CC2 box_temp was already high (from
+  bed preheating) so the `_cc2_ready` check fired in <2s; now uses CC2 box_temp exclusively
+  as the authoritative chamber reading (PB sensor runs hotter near the heater element)
+- **Pause ignored during CC2 preheating state** — CC2 ignores pause button during its own
+  preheat phase; added a `preheating → printing` transition handler that re-sends the pause
+  once the CC2 actually starts printing
+- **CC2_RESUME_OFFSET default 10 → 5** — chamber resume threshold tightened so CC2 must be
+  within 5°C of target (not 10°C) before the print is resumed
+- **Filament type handler spam** — elegoo-homeassistant delivers `active_filament_type` every
+  3s via polling; added deduplication so the handler only fires on value changes
+- **[HEAT-OFF] log misleading in CC2 printing mode** — heater stays ON during CC2 prints but
+  the log previously said "heater off" when PB reached setpoint; now logs `[AT-TEMP]` with
+  both PB and CC2 temps, and `[CC2-HEAT]` when the CC2 Warming override is active
+- **`depends_on: cc2_backend` blocking panda_backend** — removed unconditional service
+  dependency; cc2_backend is now profile-gated so panda_backend starts independently
+
 ## [2.0.5] - 2026-05-28
 
 ### Fixed
