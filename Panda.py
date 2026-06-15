@@ -412,6 +412,9 @@ def _handle_cc2_data(cc2_key, val):
         if not current_data.get("slicer_priority_mode"):
             log_event("[CC2-SLICER] Ignoring active_filament_type — slicer_priority_mode off", force_console=True)
             return
+        # Deduplicate — the HA poller delivers this every 3s; only act on changes.
+        if val == current_data.get("cc2_pending_filament", ""):
+            return
         # Always buffer the filament type — print_status may not have arrived yet
         # on container restart or MQTT reconnect. The print_start handler will apply it.
         current_data["cc2_pending_filament"] = val
