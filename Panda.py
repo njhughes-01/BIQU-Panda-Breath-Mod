@@ -373,6 +373,25 @@ def _handle_cc2_data(cc2_key, val):
                 log_event(f"[CC2-SLICER] Print started, re-arming chamber heat to {chamber_target:.0f}°C", force_console=True)
             elif chamber_target > 0:
                 log_event(f"[CC2-SLICER] Print started, Panda not connected — heat queued at chamber_setpoint={chamber_target:.0f}°C, will fire on WS connect", force_console=True)
+        # CC2 transitioned preheating → printing while we're still waiting for chamber warmup.
+        # The pause button is ignored during preheating — re-send now that it's actually printing.
+        elif cc2_paused_for_preheat and prev_status == "preheating" and new_status == "printing":
+            chamber_target = float(current_data.get("chamber_setpoint", 0))
+            chamber_now = safe_float(current_data.get("chamber_temp", 0), 0)
+            cc2_chamber_now = safe_float(current_data.get("cc2_chamber_temp", 0.0), 0.0)
+            _pb_ok = chamber_now > 1.0
+            _cc2_ok = cc2_chamber_now > 5.0
+            if _pb_ok and _cc2_ok:
+                _eff = min(chamber_now, cc2_chamber_now)
+            elif _cc2_ok:
+                _eff = cc2_chamber_now
+            elif _pb_ok:
+                _eff = chamber_now
+            else:
+                _eff = 0.0
+            if chamber_target > 0 and _eff < (chamber_target - 5):
+                log_event(f"[CC2-SLICER] CC2 started printing (was preheating) but chamber cold ({_eff:.0f}°C) — re-sending pause", force_console=True)
+                _cc2_press_button("pause")
     elif cc2_key == "filename":
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/cc2_filename", val, retain=True)
         if val:
@@ -1222,14 +1241,21 @@ async def update_limits_from_ws():
                             _pb_ist = float(current_data.get("chamber_temp", 0))
                             _cc2_ist_raw = float(current_data.get("cc2_chamber_temp", 0.0))
                             _cc2_has_data = _cc2_ist_raw > 5.0
-                            if _cc2_has_data:
-                                _cc2_ready = _cc2_ist_raw >= (_target - CC2_RESUME_OFFSET)
+                            _pb_ok = _pb_ist > 1.0
+                            # Use same effective-chamber logic as needs_preheat:
+                            # both sensors → min() so the colder one gates the resume
+                            if _cc2_has_data and _pb_ok:
+                                _effective_ist = min(_pb_ist, _cc2_ist_raw)
+                            elif _cc2_has_data:
+                                _effective_ist = _cc2_ist_raw
+                            elif _pb_ok:
+                                _effective_ist = _pb_ist
                             else:
-                                # CC2 sensor not reporting — fall back to Panda Breath at real target
-                                _cc2_ready = _pb_ist >= _target
+                                _effective_ist = 0.0
+                            _cc2_ready = _effective_ist >= (_target - CC2_RESUME_OFFSET)
                             if _target > 0 and _cc2_ready:
-                                _resume_reason = f"CC2:{_cc2_ist_raw:.0f}°C (threshold {_target - CC2_RESUME_OFFSET:.0f}°C)" if _cc2_has_data else f"PB fallback:{_pb_ist:.0f}°C (CC2 sensor unavailable)"
-                                log_event(f"[CC2-SLICER] Chamber ready PB:{_pb_ist:.0f}°C {_resume_reason} — dropping PB to {_target:.0f}°C and resuming", force_console=True)
+                                _resume_reason = f"PB:{_pb_ist:.0f}°C CC2:{_cc2_ist_raw:.0f}°C (threshold {_target - CC2_RESUME_OFFSET:.0f}°C)"
+                                log_event(f"[CC2-SLICER] Chamber ready {_resume_reason} — dropping PB to {_target:.0f}°C and resuming", force_console=True)
                                 try:
                                     await panda_send(json.dumps({
                                         "settings": {"work_mode": 2, "work_on": True, "set_temp": int(_target), "isrunning": 1}
