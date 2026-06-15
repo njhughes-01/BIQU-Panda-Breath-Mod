@@ -59,8 +59,10 @@ MIN_SWITCH_TIME = CONFIG["MIN_SWITCH_TIME"]
 # Overshooting forces faster heat-soak into the CC2 chamber body.
 # Once the CC2 sensor is within CC2_RESUME_OFFSET of target, PB is dropped back to real target.
 # Default 15 = e.g. ASA 55°C → Panda Breath heats to 70°C during warmup.
+# Note: Panda Breath hardware safety caps at 60°C — preheat_temp is clamped there.
 PREHEAT_OVERSHOOT_DELTA = float(CONFIG.get("PREHEAT_OVERSHOOT_DELTA",
                                             os.environ.get("PREHEAT_OVERSHOOT_DELTA", "15")))
+PANDA_MAX_TEMP = 60.0  # hardware safety limit — device refuses setpoints above this
 # How many °C below target the CC2 chamber sensor must reach before resuming the paused print.
 # Default 5 = resume when CC2 sensor ≥ target - 5 (e.g. ≥ 50°C for ASA 55°C target).
 # CC2 box_temp is the authoritative chamber reading; PB sensor is near the heater and runs hotter.
@@ -348,7 +350,7 @@ def _handle_cc2_data(cc2_key, val):
                         # Preheat already in progress (overshoot active) — don't override
                         log_event(f"[CC2-SLICER] Preheat already active ({_preheat_overshoot_temp}°C overshoot) — skipping redundant heat command", force_console=True)
                         return
-                    preheat_temp = t + int(PREHEAT_OVERSHOOT_DELTA) if pause else t
+                    preheat_temp = min(t + int(PREHEAT_OVERSHOOT_DELTA), int(PANDA_MAX_TEMP)) if pause else t
                     try:
                         await panda_send(json.dumps({"settings": {"isrunning": 0}}))
                         await asyncio.sleep(0.2)
