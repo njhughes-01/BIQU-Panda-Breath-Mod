@@ -1936,7 +1936,7 @@ def _discover_ha_cc2_entities() -> dict:
         dc = s.get("attributes", {}).get("device_class", "")
         domain = eid.split(".")[0]
 
-        if "chamber_temp" not in found and dc == "temperature" and "chamber" in label:
+        if "chamber_temp" not in found and dc == "temperature" and any(k in label for k in ("chamber", "box_temp", "enclosure")):
             found["chamber_temp"] = eid
         if "nozzle_temp" not in found and dc == "temperature" and "nozzle" in label:
             found["nozzle_temp"] = eid
@@ -1944,16 +1944,22 @@ def _discover_ha_cc2_entities() -> dict:
             found["bed_temp"] = eid
         if "print_status" not in found and domain == "sensor" and any(k in label for k in ("print_status", "print_state")):
             found["print_status"] = eid
-        if "print_progress" not in found and domain == "sensor" and "progress" in label:
+        if "print_progress" not in found and domain == "sensor" and any(k in label for k in ("progress", "percent_complete")):
             found["print_progress"] = eid
-        if "active_filament_type" not in found and domain == "sensor" and any(k in label for k in ("filament", "material")) and "color" not in label:
-            found["active_filament_type"] = eid
-        if "filename" not in found and domain == "sensor" and any(k in label for k in ("filename", "current_file", "print_file")):
+        if "filename" not in found and domain == "sensor" and any(k in label for k in ("filename", "file_name", "current_file", "print_file")):
             found["filename"] = eid
         if "_pause_button" not in found and domain == "button" and "pause" in label:
             found["_pause_button"] = eid
         if "_resume_button" not in found and domain == "button" and "resume" in label:
             found["_resume_button"] = eid
+        # Slot-based filament discovery (elegoo-homeassistant uses a1-a4 slots)
+        if "_active_filament_color" not in found and domain == "sensor" and "active_filament_color" in label:
+            found["_active_filament_color"] = eid
+        for slot in ("a1", "a2", "a3", "a4"):
+            if f"_{slot}_color" not in found and domain == "sensor" and f"{slot}_color" in label and "active" not in label:
+                found[f"_{slot}_color"] = eid
+            if f"_{slot}_name" not in found and domain == "sensor" and f"{slot}_name" in label:
+                found[f"_{slot}_name"] = eid
 
     log_event(f"[CC2-HA] Entity discovery: {found}", force_console=True)
     return found
@@ -2013,6 +2019,40 @@ async def ha_cc2_poller():
                             results[key] = state
                     except Exception:
                         pass
+
+                # Resolve active filament type from slot color cross-reference
+                if "active_filament_type" not in results and "_active_filament_color" in _ha_cc2_entities:
+                    try:
+                        r = requests.get(
+                            f"{HA_BASE_URL}/api/states/{_ha_cc2_entities['_active_filament_color']}",
+                            headers={"Authorization": f"Bearer {HA_TOKEN}"},
+                            timeout=3,
+                        )
+                        active_color = r.json().get("state", "").upper().strip()
+                        if active_color and active_color not in ("UNKNOWN", "UNAVAILABLE", ""):
+                            for slot in ("a1", "a2", "a3", "a4"):
+                                color_eid = _ha_cc2_entities.get(f"_{slot}_color")
+                                name_eid = _ha_cc2_entities.get(f"_{slot}_name")
+                                if not color_eid or not name_eid:
+                                    continue
+                                rc = requests.get(
+                                    f"{HA_BASE_URL}/api/states/{color_eid}",
+                                    headers={"Authorization": f"Bearer {HA_TOKEN}"},
+                                    timeout=3,
+                                )
+                                if rc.json().get("state", "").upper().strip() == active_color:
+                                    rn = requests.get(
+                                        f"{HA_BASE_URL}/api/states/{name_eid}",
+                                        headers={"Authorization": f"Bearer {HA_TOKEN}"},
+                                        timeout=3,
+                                    )
+                                    slot_name = rn.json().get("state", "")
+                                    if slot_name and slot_name not in ("unknown", "unavailable", ""):
+                                        results["active_filament_type"] = slot_name
+                                    break
+                    except Exception:
+                        pass
+
                 return results
 
             raw = await loop.run_in_executor(None, fetch_all)
