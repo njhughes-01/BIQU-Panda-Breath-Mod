@@ -2255,8 +2255,16 @@ async def ha_cc2_poller():
                             headers={"Authorization": f"Bearer {HA_TOKEN}"},
                             timeout=3,
                         )
-                        state = r.json().get("state", "")
+                        state_data = r.json()
+                        state = state_data.get("state", "")
                         if state not in ("unknown", "unavailable", ""):
+                            if key in ("chamber_temp", "nozzle_temp", "bed_temp"):
+                                unit = state_data.get("attributes", {}).get("unit_of_measurement", "")
+                                if unit == "°F":
+                                    try:
+                                        state = str(round((float(state) - 32) * 5 / 9, 1))
+                                    except ValueError:
+                                        pass
                             results[key] = state
                     except Exception:
                         pass
