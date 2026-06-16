@@ -63,6 +63,13 @@ MIN_SWITCH_TIME = CONFIG["MIN_SWITCH_TIME"]
 PREHEAT_OVERSHOOT_DELTA = float(CONFIG.get("PREHEAT_OVERSHOOT_DELTA",
                                             os.environ.get("PREHEAT_OVERSHOOT_DELTA", "15")))
 PANDA_MAX_TEMP = 60.0  # hardware safety limit — device refuses setpoints above this
+# Dynamic overshoot: while CC2 is more than CC2_OVERSHOOT_MAX_DELTA below target, PB runs at
+# PANDA_MAX_TEMP to push extra heat into the chamber.  Once CC2 climbs to within
+# CC2_OVERSHOOT_MIN_DELTA of target the setpoint drops back to target (hysteresis prevents thrash).
+CC2_OVERSHOOT_MAX_DELTA = float(CONFIG.get("CC2_OVERSHOOT_MAX_DELTA",
+                                            os.environ.get("CC2_OVERSHOOT_MAX_DELTA", "15")))
+CC2_OVERSHOOT_MIN_DELTA = float(CONFIG.get("CC2_OVERSHOOT_MIN_DELTA",
+                                            os.environ.get("CC2_OVERSHOOT_MIN_DELTA", "7")))
 # How many °C below target the CC2 chamber sensor must reach before resuming the paused print.
 # Default 5 = resume when CC2 sensor ≥ target - 5 (e.g. ≥ 50°C for ASA 55°C target).
 # CC2 box_temp is the authoritative chamber reading; PB sensor is near the heater and runs hotter.
@@ -173,6 +180,7 @@ panda_writer = None  # asyncio StreamWriter from v1.0.3 TLS path
 main_loop = None
 cc2_paused_for_preheat = False  # True when we paused the CC2 to wait for chamber temp
 _preheat_overshoot_temp = 0    # set_temp sent to Panda Breath during preheat (target + overshoot delta)
+_cc2_dynamic_overshoot_active = False  # True when CC2 far cold mid-print — boost PB to PANDA_MAX_TEMP
 
 PREHEAT_STATE_FILE = BASE_DIR / "preheat_state.json"
 PREHEAT_STATE_MAX_AGE = 43200  # 12h — discard persisted state older than this
@@ -1170,6 +1178,7 @@ async def update_limits_from_ws():
     global global_heating_state, last_switch_time
     global last_live_log_state, last_live_log_time
     global last_stop_command_time, cc2_paused_for_preheat, _preheat_overshoot_temp
+    global _cc2_dynamic_overshoot_active
     global _last_heat_status, _last_heat_log_time
     global _ws_bind_time
     uri = f"ws://{PANDA_IP}/ws"
@@ -1271,8 +1280,12 @@ async def update_limits_from_ws():
                                 "printing", "preheating", "paused", "pausing", "resuming", "stopping"
                             }
                             if chamber_target > 0 and not power_forced_off and not global_lock and _reconnect_printing:
-                                _reconnect_temp = _preheat_overshoot_temp if (cc2_paused_for_preheat and _preheat_overshoot_temp > 0) else int(chamber_target)
-                                log_event(f"[WS-RECONNECT] Resuming heat to {_reconnect_temp}°C after WS reconnect{'  (overshoot active)' if _reconnect_temp != int(chamber_target) else ''}", force_console=True)
+                                _reconnect_temp = (
+                                    _preheat_overshoot_temp if (cc2_paused_for_preheat and _preheat_overshoot_temp > 0)
+                                    else int(PANDA_MAX_TEMP) if (_cc2_dynamic_overshoot_active and CC2_ACTIVE)
+                                    else int(chamber_target)
+                                )
+                                log_event(f"[WS-RECONNECT] Resuming heat to {_reconnect_temp}°C after WS reconnect{'  (dynamic overshoot)' if (_cc2_dynamic_overshoot_active and _reconnect_temp == int(PANDA_MAX_TEMP)) else '  (preheat overshoot)' if _reconnect_temp != int(chamber_target) else ''}", force_console=True)
                                 await websocket.send(json.dumps({
                                     "settings": {
                                         "work_mode": 2,
@@ -1574,20 +1587,46 @@ async def update_limits_from_ws():
 
                         elif work_mode_live == 2:
                             if CC2_ACTIVE and (target == 0 or not _cc2_printing):
+                                _cc2_dynamic_overshoot_active = False
                                 target_state, info = RELAY_OFF, "Idle"
                             elif ist < (target - HYSTERESE):
+                                # PB still climbing — set overshoot flag so heat cmd uses right set_temp
+                                if CC2_ACTIVE and _cc2_printing and target > 0:
+                                    _cc2_now = float(current_data.get("cc2_chamber_temp", 0.0))
+                                    _cc2_delta = target - _cc2_now
+                                    if _cc2_delta > CC2_OVERSHOOT_MAX_DELTA:
+                                        _cc2_dynamic_overshoot_active = True
+                                    elif _cc2_delta <= CC2_OVERSHOOT_MIN_DELTA:
+                                        _cc2_dynamic_overshoot_active = False
                                 target_state, info = RELAY_ON, "Heating..."
                             elif CC2_ACTIVE and _cc2_printing and target > 0:
                                 _cc2_now = float(current_data.get("cc2_chamber_temp", 0.0))
-                                if _cc2_now > 5.0 and _cc2_now < (target - 5):
-                                    # PB at setpoint but CC2 chamber still more than 5°C cold —
-                                    # keep heater running until chamber catches up.
+                                _cc2_delta = target - _cc2_now
+                                _prev_overshoot = _cc2_dynamic_overshoot_active
+                                if _cc2_delta > CC2_OVERSHOOT_MAX_DELTA:
+                                    _cc2_dynamic_overshoot_active = True
+                                elif _cc2_delta <= CC2_OVERSHOOT_MIN_DELTA:
+                                    _cc2_dynamic_overshoot_active = False
+                                # send live set_temp update only on overshoot state change
+                                if _cc2_dynamic_overshoot_active != _prev_overshoot and panda_ws:
+                                    try:
+                                        _new_st = int(PANDA_MAX_TEMP) if _cc2_dynamic_overshoot_active else int(target)
+                                        await panda_ws.send(json.dumps({"settings": {"set_temp": _new_st}}))
+                                        log_event(
+                                            f"[CC2-OVERSHOOT-{'ON' if _cc2_dynamic_overshoot_active else 'OFF'}] "
+                                            f"CC2:{_cc2_now:.0f}°C target:{target:.0f}°C Δ{_cc2_delta:.0f}°C → set_temp {_new_st}°C",
+                                            force_console=True
+                                        )
+                                    except Exception as _oe:
+                                        log_event(f"[CC2-OVERSHOOT-ERR] set_temp update failed: {_oe}", force_console=True)
+                                if _cc2_now > 5.0 and _cc2_delta > CC2_OVERSHOOT_MIN_DELTA:
+                                    # PB at setpoint but CC2 still cold — keep heater on
                                     target_state, info = RELAY_ON, "CC2 Warming..."
                                 else:
-                                    # Both sensors satisfied — keep device ON so its internal
-                                    # PID maintains the setpoint autonomously.
+                                    # Both sensors satisfied — device PID maintains setpoint autonomously
                                     target_state, info = RELAY_ON, "At Temperature"
                             else:
+                                _cc2_dynamic_overshoot_active = False
                                 target_state, info = RELAY_OFF, "At Temperature"
 
                         else:
@@ -1644,7 +1683,11 @@ async def update_limits_from_ws():
                                 last_switch_time = time.time()
                                 last_stop_command_time = 0
                                 try:
-                                    _effective_target = _preheat_overshoot_temp if (cc2_paused_for_preheat and _preheat_overshoot_temp > 0) else int(target)
+                                    _effective_target = (
+                                        _preheat_overshoot_temp if (cc2_paused_for_preheat and _preheat_overshoot_temp > 0)
+                                        else int(PANDA_MAX_TEMP) if (_cc2_dynamic_overshoot_active and CC2_ACTIVE)
+                                        else int(target)
+                                    )
                                     heat_cmd: dict = {
                                         "work_on": True,
                                         "set_temp": _effective_target,
@@ -1671,8 +1714,9 @@ async def update_limits_from_ws():
                         _now_log = time.time()
                         if info != _last_heat_status:
                             if info == "Heating...":
+                                _cc2_log = float(current_data.get("cc2_chamber_temp", 0.0))
                                 log_event(
-                                    f"[HEAT-ON] Chamber {ist:.0f}°C — target {target:.0f}°C "
+                                    f"[HEAT-ON] PB:{ist:.0f}°C CC2:{_cc2_log:.0f}°C — target {target:.0f}°C "
                                     f"(threshold {target - HYSTERESE:.0f}°C) — heater starting",
                                     force_console=True
                                 )
@@ -1698,15 +1742,17 @@ async def update_limits_from_ws():
                             elif info == "Idle":
                                 log_event("[IDLE] No active CC2 print — heater standby", force_console=True)
                             elif info == "At Temperature" and _last_heat_status not in ("Heating...", "CC2 Warming...", ""):
+                                _cc2_log = float(current_data.get("cc2_chamber_temp", 0.0))
                                 log_event(
-                                    f"[AT-TEMP] Chamber {ist:.0f}/{target:.0f}°C — within hysteresis, holding",
+                                    f"[AT-TEMP] PB:{ist:.0f}°C CC2:{_cc2_log:.0f}°C target:{target:.0f}°C Δ{ist - _cc2_log:+.0f}°C — within hysteresis, holding",
                                     force_console=True
                                 )
                             _last_heat_status = info
                             _last_heat_log_time = _now_log
                         elif (_now_log - _last_heat_log_time) >= 60:
+                            _cc2_log = float(current_data.get("cc2_chamber_temp", 0.0))
                             log_event(
-                                f"[STATUS] Chamber {ist:.0f}/{target:.0f}°C | "
+                                f"[STATUS] PB:{ist:.0f}°C CC2:{_cc2_log:.0f}°C target:{target:.0f}°C Δ{ist - _cc2_log:+.0f}°C | "
                                 f"Heat:{'ON' if heating_active else 'OFF'} | {info}",
                                 force_console=True
                             )
