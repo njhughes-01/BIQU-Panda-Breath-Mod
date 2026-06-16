@@ -462,8 +462,19 @@ def _handle_cc2_data(cc2_key, val):
             return
         target = FILAMENT_CHAMBER_MAP.get(val.upper(), FILAMENT_CHAMBER_MAP.get(val))
         if target is None:
-            log_event(f"[CC2-SLICER] Unknown filament type {val!r}, no chamber target", force_console=True)
-            return
+            # Fuzzy match: find longest map key that appears in the filament name
+            # e.g. "Generic ASA" → "ASA", "PA12-CF Fiber" → "PA12-CF"
+            _upper = val.upper()
+            _match = max(
+                (k for k in FILAMENT_CHAMBER_MAP if k in _upper),
+                key=len, default=None
+            )
+            if _match is not None:
+                target = FILAMENT_CHAMBER_MAP[_match]
+                log_event(f"[CC2-SLICER] Fuzzy filament match: {val!r} → {_match!r} → {target}°C", force_console=True)
+            else:
+                log_event(f"[CC2-SLICER] Unknown filament type {val!r}, no chamber target", force_console=True)
+                return
         current_data["chamber_setpoint"] = float(target)
         current_data["slicer_soll"] = float(target)
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(target), retain=True)
@@ -627,6 +638,10 @@ def on_mqtt_message(client, userdata, msg):
 
         payload = msg.payload.decode().strip().lower()
         is_on = payload in ("on", "1", "true")
+        if CC2_ACTIVE and not is_on:
+            # CC2 mode always requires slicer_priority_mode to read filament type from CC2
+            log_event("[CC2] slicer_priority_mode cannot be disabled in CC2 mode — ignoring OFF command", force_console=True)
+            is_on = True
         current_data["slicer_priority_mode"] = is_on
 
         log_event(">>> SLICER MODE ENTERED <<<", force_console=True)
@@ -2134,13 +2149,23 @@ async def ha_cc2_poller():
                                     slot_name = rn.json().get("state", "")
                                     if slot_name and slot_name not in ("unknown", "unavailable", ""):
                                         results["active_filament_type"] = slot_name
+                                        log_event(f"[CC2-HA] Active filament resolved: slot={slot} color={active_color} name={slot_name!r}", force_console=True)
+                                    else:
+                                        log_event(f"[CC2-HA] Color match on slot={slot} but name unavailable", force_console=True)
                                     break
-                    except Exception:
-                        pass
+                        else:
+                            log_event(f"[CC2-HA] Active filament color unavailable ({active_color!r}) — filament type unknown", force_console=True)
+                    except Exception as _fe:
+                        log_event(f"[CC2-HA] Filament color cross-ref error: {_fe}", force_console=True)
 
                 return results
 
             raw = await loop.run_in_executor(None, fetch_all)
+            # Log raw print_status whenever it changes so we can debug unexpected values
+            _raw_status = raw.get("print_status", "")
+            if _raw_status and _raw_status != current_data.get("_last_ha_status_raw", ""):
+                current_data["_last_ha_status_raw"] = _raw_status
+                log_event(f"[CC2-HA] print_status changed → {_raw_status!r}", force_console=True)
             for key, state_val in raw.items():
                 try:
                     val = KEY_TRANSFORMS[key](state_val)
