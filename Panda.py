@@ -1035,6 +1035,18 @@ def setup_mqtt_discovery(client):
         "device_class": "temperature", "device": dev
     }), retain=True)
 
+    # CC2 temperature sensors (values converted to °C before publish)
+    for sfx, name, obj in [
+        ("cc2_chamber_temp", "CC2 Chamber Temp", "panda_cc2_chamber_temp"),
+        ("cc2_nozzle_temp",  "CC2 Nozzle Temp",  "panda_cc2_nozzle_temp"),
+        ("cc2_bed_temp",     "CC2 Bed Temp",      "panda_cc2_bed_temp"),
+    ]:
+        client.publish(f"homeassistant/sensor/{base}_{obj}/config", json.dumps({
+            "name": name, "unique_id": f"{sn}_{obj}", "object_id": obj,
+            "state_topic": f"{base}/{sfx}", "unit_of_measurement": "°C",
+            "device_class": "temperature", "state_class": "measurement", "device": dev
+        }), retain=True)
+
     client.publish(f"homeassistant/sensor/{base}_version/config", json.dumps({
         "name": "Panda Version", "unique_id": f"{sn}_version", "object_id": "panda_version",
         "state_topic": f"{base}/version", "device": dev, "icon": "mdi:information-outline"
