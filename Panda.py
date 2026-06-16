@@ -110,6 +110,9 @@ CC2_IP = CONFIG.get("CC2_IP", os.environ.get("CC2_IP", ""))
 CC2_TOPIC_PREFIX = CONFIG.get("CC2_TOPIC_PREFIX", os.environ.get("CC2_TOPIC_PREFIX", "cc2"))
 CC2_HA_MODE = CONFIG.get("CC2_HA_MODE", os.environ.get("CC2_HA_MODE", "")).lower() in ("true", "1", "yes")
 CC2_ACTIVE = bool(CC2_IP) or CC2_HA_MODE
+# Fallback chamber target when filament type is unknown at print start (0 = disabled).
+# Set CC2_HA_FALLBACK_TEMP=45 to pause and heat to 45°C for any unknown filament.
+CC2_HA_FALLBACK_TEMP = float(CONFIG.get("CC2_HA_FALLBACK_TEMP", os.environ.get("CC2_HA_FALLBACK_TEMP", "0")))
 HA_BASE_URL = CONFIG.get("HA_BASE_URL", os.environ.get("HA_BASE_URL", ""))
 _ha_cc2_entities: dict = {}
 MQTT_PORT = CONFIG.get("MQTT_PORT", int(os.environ.get("HA_MQTT_PORT", 1883)))
@@ -363,6 +366,13 @@ def _handle_cc2_data(cc2_key, val):
                         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(fil_target), retain=True)
                         chamber_target = float(fil_target)
                         log_event(f"[CC2-SLICER] Applied buffered filament {pending} → {chamber_target:.0f}°C on print start", force_console=True)
+            # Last resort: use fallback temp when filament type is completely unknown
+            if chamber_target == 0 and CC2_HA_FALLBACK_TEMP > 0:
+                chamber_target = CC2_HA_FALLBACK_TEMP
+                current_data["chamber_setpoint"] = chamber_target
+                log_event(f"[CC2-SLICER] Filament type unknown — using fallback target {chamber_target:.0f}°C (set CC2_HA_FALLBACK_TEMP=0 to disable)", force_console=True)
+            elif chamber_target == 0:
+                log_event(f"[CC2-SLICER] Print started but no chamber target set — filament type not resolved, no preheat. Set CC2_HA_FALLBACK_TEMP to enable safety fallback.", force_console=True)
             if chamber_target > 0 and (panda_ws or panda_writer):
                 chamber_now = safe_float(current_data.get("chamber_temp", 0), 0)
                 cc2_chamber_now = safe_float(current_data.get("cc2_chamber_temp", 0.0), 0.0)
@@ -2105,23 +2115,12 @@ async def ha_cc2_poller():
         try:
             def fetch_all():
                 results = {}
-                for key, eid in _ha_cc2_entities.items():
-                    if key.startswith("_") or key not in KEY_TRANSFORMS:
-                        continue
-                    try:
-                        r = requests.get(
-                            f"{HA_BASE_URL}/api/states/{eid}",
-                            headers={"Authorization": f"Bearer {HA_TOKEN}"},
-                            timeout=3,
-                        )
-                        state = r.json().get("state", "")
-                        if state not in ("unknown", "unavailable", ""):
-                            results[key] = state
-                    except Exception:
-                        pass
 
-                # Resolve active filament type from slot color cross-reference
-                if "active_filament_type" not in results and "_active_filament_color" in _ha_cc2_entities:
+                # ── Step 1: resolve filament type FIRST ──────────────────────────
+                # Must happen before print_status so chamber_setpoint is set when
+                # the idle→printing transition fires. Otherwise preheat silently
+                # skips because chamber_target=0 at transition time.
+                if "_active_filament_color" in _ha_cc2_entities:
                     try:
                         r = requests.get(
                             f"{HA_BASE_URL}/api/states/{_ha_cc2_entities['_active_filament_color']}",
@@ -2157,6 +2156,22 @@ async def ha_cc2_poller():
                             log_event(f"[CC2-HA] Active filament color unavailable ({active_color!r}) — filament type unknown", force_console=True)
                     except Exception as _fe:
                         log_event(f"[CC2-HA] Filament color cross-ref error: {_fe}", force_console=True)
+
+                # ── Step 2: fetch status/sensor entities ─────────────────────────
+                for key, eid in _ha_cc2_entities.items():
+                    if key.startswith("_") or key not in KEY_TRANSFORMS or key == "active_filament_type":
+                        continue  # active_filament_type already resolved above
+                    try:
+                        r = requests.get(
+                            f"{HA_BASE_URL}/api/states/{eid}",
+                            headers={"Authorization": f"Bearer {HA_TOKEN}"},
+                            timeout=3,
+                        )
+                        state = r.json().get("state", "")
+                        if state not in ("unknown", "unavailable", ""):
+                            results[key] = state
+                    except Exception:
+                        pass
 
                 return results
 
