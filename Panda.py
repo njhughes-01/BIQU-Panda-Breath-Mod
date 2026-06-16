@@ -2123,6 +2123,8 @@ async def ha_cc2_poller():
         "filename":             lambda v: v,
     }
 
+    _log_state = {"last_filename": None, "last_color_unavail": None}
+
     while True:
         try:
             def fetch_all():
@@ -2149,7 +2151,9 @@ async def ha_cc2_poller():
                             _temp_from_name = _chamber_temp_from_filename(_fname)
                             if _temp_from_name > 0:
                                 results["_filename_chamber_temp"] = _temp_from_name
-                                log_event(f"[CC2-HA] Chamber temp from filename: {_fname!r} → {_temp_from_name:.0f}°C", force_console=True)
+                                if _fname != _log_state["last_filename"]:
+                                    log_event(f"[CC2-HA] Chamber temp from filename: {_fname!r} → {_temp_from_name:.0f}°C", force_console=True)
+                                    _log_state["last_filename"] = _fname
                     except Exception as _fe:
                         log_event(f"[CC2-HA] Filename fetch error: {_fe}", force_console=True)
 
@@ -2187,7 +2191,9 @@ async def ha_cc2_poller():
                                         log_event(f"[CC2-HA] Color match on slot={slot} but name unavailable", force_console=True)
                                     break
                         else:
-                            log_event(f"[CC2-HA] Active filament color unavailable ({active_color!r}) — filament type unknown", force_console=True)
+                            if active_color != _log_state["last_color_unavail"]:
+                                log_event(f"[CC2-HA] Active filament color unavailable ({active_color!r}) — filament type unknown", force_console=True)
+                                _log_state["last_color_unavail"] = active_color
                     except Exception as _fe:
                         log_event(f"[CC2-HA] Filament color cross-ref error: {_fe}", force_console=True)
 
