@@ -170,6 +170,41 @@ panda_writer = None  # asyncio StreamWriter from v1.0.3 TLS path
 main_loop = None
 cc2_paused_for_preheat = False  # True when we paused the CC2 to wait for chamber temp
 _preheat_overshoot_temp = 0    # set_temp sent to Panda Breath during preheat (target + overshoot delta)
+
+PREHEAT_STATE_FILE = BASE_DIR / "preheat_state.json"
+PREHEAT_STATE_MAX_AGE = 43200  # 12h — discard persisted state older than this
+
+def _save_preheat_state():
+    try:
+        with open(PREHEAT_STATE_FILE, "w") as _f:
+            json.dump({
+                "cc2_paused_for_preheat": cc2_paused_for_preheat,
+                "preheat_overshoot_temp": _preheat_overshoot_temp,
+                "chamber_setpoint": current_data.get("chamber_setpoint", 0),
+                "written_at": time.time(),
+            }, _f)
+    except Exception as _e:
+        log_event(f"[PREHEAT-STATE] Save failed: {_e}")
+
+def _load_preheat_state():
+    global cc2_paused_for_preheat, _preheat_overshoot_temp
+    try:
+        if not PREHEAT_STATE_FILE.exists():
+            return
+        with open(PREHEAT_STATE_FILE) as _f:
+            _s = json.load(_f)
+        if time.time() - _s.get("written_at", 0) > PREHEAT_STATE_MAX_AGE:
+            log_event("[PREHEAT-STATE] Discarding stale preheat state (>12h old)")
+            PREHEAT_STATE_FILE.unlink(missing_ok=True)
+            return
+        if _s.get("cc2_paused_for_preheat"):
+            cc2_paused_for_preheat = True
+            _preheat_overshoot_temp = int(_s.get("preheat_overshoot_temp", 0))
+            log_event(f"[PREHEAT-STATE] Restored: paused_for_preheat=True overshoot={_preheat_overshoot_temp}°C", force_console=True)
+    except Exception as _e:
+        log_event(f"[PREHEAT-STATE] Load failed: {_e}")
+
+_load_preheat_state()
 terminal_cleared = False
 # Merkt sich den letzten vollständigen WS-Settings-Stand
 last_ws_settings = {}
@@ -307,6 +342,7 @@ def _handle_cc2_data(cc2_key, val):
             if cc2_paused_for_preheat:
                 cc2_paused_for_preheat = False
                 _preheat_overshoot_temp = 0
+                _save_preheat_state()
             async def _cc2_off():
                 try:
                     await panda_send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "set_temp": 0}}))
@@ -339,10 +375,10 @@ def _handle_cc2_data(cc2_key, val):
                 elif _pb_ok:
                     effective_chamber = chamber_now
                 else:
-                    # No sensor data yet. If arriving as 'paused' (restart during preheat),
-                    # assume cold — conservative, re-arms preheat. If 'printing', assume
-                    # at temp — avoids false pause on a fresh print before first WS frame.
-                    effective_chamber = 0.0 if new_status == 'paused' else chamber_target
+                    # No sensor data yet — assume cold. A false pause is safer than printing
+                    # without chamber heat (e.g. mid-print restart with 43°C chamber for ASA).
+                    # Resume logic releases the pause once real temp confirms warm enough.
+                    effective_chamber = 0.0
                 needs_preheat = effective_chamber < (chamber_target - 5) and not cc2_paused_for_preheat
                 async def _cc2_heat_on_start(t=int(chamber_target), pause=needs_preheat):
                     global cc2_paused_for_preheat, global_heating_state, _preheat_overshoot_temp
@@ -367,10 +403,10 @@ def _handle_cc2_data(cc2_key, val):
                         return
                     if pause and not cc2_paused_for_preheat:
                         log_event(f"[CC2-SLICER] Chamber cold ({chamber_now:.0f}°C), pausing CC2 — heating to {preheat_temp}°C (overshoot), target {t}°C", force_console=True)
+                        cc2_paused_for_preheat = True  # set before sleep to survive WS reconnect in the gap
+                        _save_preheat_state()
                         await asyncio.sleep(1.5)
-                        if not cc2_paused_for_preheat:
-                            _cc2_press_button("pause")
-                            cc2_paused_for_preheat = True
+                        _cc2_press_button("pause")
                 if main_loop:
                     asyncio.run_coroutine_threadsafe(_cc2_heat_on_start(), main_loop)
                 log_event(f"[CC2-SLICER] Print started, re-arming chamber heat to {chamber_target:.0f}°C", force_console=True)
@@ -444,13 +480,13 @@ def _handle_cc2_data(cc2_key, val):
             elif _pb_ok:
                 effective_chamber = chamber_now
             else:
-                _cur_cc2_status = current_data.get("cc2_print_status", "idle")
-                effective_chamber = 0.0 if _cur_cc2_status in ('paused', 'pausing') else float(target)
+                # No sensor data — assume cold. Triggers preheat/pause if needed.
+                effective_chamber = 0.0
             # Don't re-pause on MQTT reconnect delivering retained active_filament_type
             needs_preheat = effective_chamber < (float(target) - 5) and not cc2_paused_for_preheat
             async def _cc2_heat(t=int(target), pause=needs_preheat):
                 global cc2_paused_for_preheat, global_heating_state, _preheat_overshoot_temp
-                preheat_temp = t + int(PREHEAT_OVERSHOOT_DELTA) if pause else t
+                preheat_temp = min(t + int(PREHEAT_OVERSHOOT_DELTA), int(PANDA_MAX_TEMP)) if pause else t
                 try:
                     await panda_send(json.dumps({"settings": {"isrunning": 0}}))
                     await asyncio.sleep(0.2)
@@ -472,10 +508,10 @@ def _handle_cc2_data(cc2_key, val):
                     return
                 if pause and not cc2_paused_for_preheat:
                     log_event(f"[CC2-SLICER] Chamber cold ({chamber_now:.0f}°C), pausing CC2 — heating to {preheat_temp}°C (overshoot), target {t}°C", force_console=True)
+                    cc2_paused_for_preheat = True  # set before sleep to survive WS reconnect in the gap
+                    _save_preheat_state()
                     await asyncio.sleep(1.5)
-                    if not cc2_paused_for_preheat:
-                        _cc2_press_button("pause")
-                        cc2_paused_for_preheat = True
+                    _cc2_press_button("pause")
             if main_loop:
                 asyncio.run_coroutine_threadsafe(_cc2_heat(), main_loop)
             else:
@@ -567,6 +603,7 @@ def on_mqtt_message(client, userdata, msg):
         if cc2_paused_for_preheat:
             cc2_paused_for_preheat = False
             _preheat_overshoot_temp = 0
+            _save_preheat_state()
             _cc2_press_button("resume")
             log_event("[CC2] Resuming CC2 after unlock", force_console=True)
 
@@ -660,6 +697,7 @@ def on_mqtt_message(client, userdata, msg):
         if cc2_paused_for_preheat:
             cc2_paused_for_preheat = False
             _preheat_overshoot_temp = 0
+            _save_preheat_state()
             _cc2_press_button("resume")
             log_event("[CC2] Resuming CC2 before emergency stop", force_console=True)
 
@@ -823,6 +861,7 @@ def on_mqtt_message(client, userdata, msg):
             if cc2_paused_for_preheat:
                 cc2_paused_for_preheat = False
                 _preheat_overshoot_temp = 0
+                _save_preheat_state()
                 _cc2_press_button("resume")
                 log_event("[CC2] Resuming CC2 before heater power off", force_console=True)
 
@@ -1265,11 +1304,13 @@ async def update_limits_from_ws():
                                 if _cc2_status_now in ("paused", "pausing"):
                                     cc2_paused_for_preheat = False
                                     _preheat_overshoot_temp = 0
+                                    _save_preheat_state()
                                     _cc2_press_button("resume")
                                 elif _cc2_status_now in ("printing", "resuming"):
                                     # User already resumed manually — clear preheat state, no-op
                                     cc2_paused_for_preheat = False
                                     _preheat_overshoot_temp = 0
+                                    _save_preheat_state()
                                     log_event(f"[CC2-SLICER] Chamber ready, CC2 already {_cc2_status_now} — clearing preheat state", force_console=True)
                                 else:
                                     # Transient state (stopping, initializing, etc.) — keep flag, retry next cycle

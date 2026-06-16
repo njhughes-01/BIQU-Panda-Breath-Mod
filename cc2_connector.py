@@ -765,6 +765,8 @@ def cc2_on_disconnect(client: Client, userdata: Any, disconnect_flags: Any, rc: 
         _last_filament_type = ""
     if ha_client and ha_client.is_connected():
         ha_client.publish(f"{CC2_TOPIC_PREFIX}/status", "offline", qos=1, retain=True)
+        # Zero stale chamber temp so Panda.py falls back to PB sensor until CC2 reconnects.
+        ha_client.publish(f"{CC2_TOPIC_PREFIX}/chamber_temp", "0", retain=True)
         logger.info("Marked CC2 unavailable in HA (printer MQTT disconnected)")
 
 
