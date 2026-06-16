@@ -270,6 +270,18 @@ def safe_float(v, default=0.0):
     except Exception:
         return default
 
+def _chamber_temp_from_filename(filename: str) -> float:
+    """Extract explicit chamber temp from filename. Convention: include NNc or NNC in name.
+    Examples: asa_benchy_55C.gcode, [55c]_vase.gcode, print_chamber55.gcode → 55.0
+    Returns 0.0 if no temp found or temp outside 20-85°C sanity range."""
+    import re
+    m = re.search(r'(?<!\d)(\d{2,3})[Cc](?!\d)', filename)
+    if m:
+        temp = float(m.group(1))
+        if 20.0 <= temp <= 85.0:
+            return temp
+    return 0.0
+
 # ✅ SLICER PARSER (OPTIMIERT: Nutzt run_in_executor gegen Blockaden)
 async def slicer_auto_parser():
     loop = asyncio.get_event_loop()
@@ -2120,7 +2132,29 @@ async def ha_cc2_poller():
                 # Must happen before print_status so chamber_setpoint is set when
                 # the idle→printing transition fires. Otherwise preheat silently
                 # skips because chamber_target=0 at transition time.
-                if "_active_filament_color" in _ha_cc2_entities:
+
+                # 1a. Filename-encoded chamber temp (highest priority, no name matching)
+                # Convention: include NNc or NNC in filename, e.g. asa_benchy_55C.gcode
+                _fname_eid = _ha_cc2_entities.get("filename")
+                if _fname_eid:
+                    try:
+                        _fr = requests.get(
+                            f"{HA_BASE_URL}/api/states/{_fname_eid}",
+                            headers={"Authorization": f"Bearer {HA_TOKEN}"},
+                            timeout=3,
+                        )
+                        _fname = _fr.json().get("state", "")
+                        if _fname and _fname not in ("unknown", "unavailable", ""):
+                            results["filename"] = _fname
+                            _temp_from_name = _chamber_temp_from_filename(_fname)
+                            if _temp_from_name > 0:
+                                results["_filename_chamber_temp"] = _temp_from_name
+                                log_event(f"[CC2-HA] Chamber temp from filename: {_fname!r} → {_temp_from_name:.0f}°C", force_console=True)
+                    except Exception as _fe:
+                        log_event(f"[CC2-HA] Filename fetch error: {_fe}", force_console=True)
+
+                # 1b. Color cross-ref filament name (fallback if no temp in filename)
+                if "_filename_chamber_temp" not in results and "_active_filament_color" in _ha_cc2_entities:
                     try:
                         r = requests.get(
                             f"{HA_BASE_URL}/api/states/{_ha_cc2_entities['_active_filament_color']}",
@@ -2161,6 +2195,8 @@ async def ha_cc2_poller():
                 for key, eid in _ha_cc2_entities.items():
                     if key.startswith("_") or key not in KEY_TRANSFORMS or key == "active_filament_type":
                         continue  # active_filament_type already resolved above
+                    if key == "filename" and "filename" in results:
+                        continue  # already fetched in step 1a
                     try:
                         r = requests.get(
                             f"{HA_BASE_URL}/api/states/{eid}",
@@ -2176,6 +2212,13 @@ async def ha_cc2_poller():
                 return results
 
             raw = await loop.run_in_executor(None, fetch_all)
+            # Apply filename-encoded chamber temp (priority 1) before status processing
+            _fn_temp = raw.pop("_filename_chamber_temp", None)
+            if _fn_temp and _fn_temp != current_data.get("chamber_setpoint", 0):
+                current_data["chamber_setpoint"] = float(_fn_temp)
+                current_data["cc2_pending_filament"] = f"FILENAME-{int(_fn_temp)}C"
+                mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(_fn_temp), retain=True)
+                mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_target_temp", int(_fn_temp), retain=True)
             # Log raw print_status whenever it changes so we can debug unexpected values
             _raw_status = raw.get("print_status", "")
             if _raw_status and _raw_status != current_data.get("_last_ha_status_raw", ""):
