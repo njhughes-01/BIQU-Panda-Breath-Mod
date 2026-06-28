@@ -198,11 +198,11 @@ INDEX_HTML = """<!doctype html>
         <strong style="color:#fff;display:block;margin-bottom:6px">Slicer Priority — CC2 (Automatic)</strong>
         <b>How it works</b> — Enable <b>Slicer Priority Mode</b> in Home Assistant and set the Panda to <b>Auto</b> mode. When a print starts, the cc2_backend reads the active AMS tray's filament type directly from the CC2 and the Panda backend automatically sets the Chamber Target. No OrcaSlicer changes needed.<br><br>
         <b>Default filament → chamber temp:</b><br>
-        PLA / PLA+ / TPU / TPE → 0°C (off)<br>
-        PETG → 35°C<br>
-        ABS / ASA → 55°C<br>
-        PA → 65°C &nbsp;|&nbsp; PA-CF / PA12-CF / PC → 70°C<br>
-        PC-ABS → 65°C<br><br>
+        PLA / PLA+ / PLA-CF / PLA-GF / TPU / TPE → 0°C (off)<br>
+        PET / PET-CF / PETG / PETG-CF / PETG-GF → 35°C<br>
+        ABS / ABS-CF / ABS-GF / ASA / ASA-CF / ASA-GF → 55°C<br>
+        PA / PA6 / PA12 / Nylon / PC-ABS → 65°C<br>
+        PA-CF / PA-GF / PA6-CF / PA6-GF / PA12-CF / PA12-GF / PAHT-CF / PC / PC-CF / PC-FR → 70°C<br><br>
         <b>Custom overrides</b> — Set the <code>CC2_FILAMENT_MAP</code> env var as JSON to override any value, e.g. <code>&#123;"PETG":"40","ABS":"60"&#125;</code>. Unmapped filaments fall back to the defaults above.
       </div>
       <div>

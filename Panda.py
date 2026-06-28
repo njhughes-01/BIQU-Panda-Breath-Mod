@@ -44,8 +44,43 @@ POWER_CONFIRM_TIMEOUT = 6.0          # Sekunden warten, bis WS "work_on" nachzie
 # ==========================================
 CONFIG_PATH = BASE_DIR / "panda_config.json"
 
-with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-    CONFIG = json.load(f)
+def _env_bool(name, default=False):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.lower() in ("true", "1", "yes", "on")
+
+def _load_config():
+    config = {
+        "DEBUG": _env_bool("PANDA_DEBUG", False),
+        "DEBUG_TO_FILE": _env_bool("PANDA_DEBUG_TO_FILE", True),
+        "HYSTERESE": float(os.environ.get("HYSTERESE", "1.5")),
+        "MIN_SWITCH_TIME": float(os.environ.get("MIN_SWITCH_TIME", "10")),
+        "MQTT_BROKER": os.environ.get("HA_MQTT_BROKER", "mosquitto"),
+        "MQTT_PORT": int(os.environ.get("HA_MQTT_PORT", "1883")),
+        "MQTT_USER": os.environ.get("HA_MQTT_USER", ""),
+        "MQTT_PASS": os.environ.get("HA_MQTT_PASS", ""),
+        "MQTT_TOPIC_PREFIX": os.environ.get("PANDA_MQTT_TOPIC_PREFIX", "panda_breath_mod"),
+        "HOST_IP": os.environ.get("PANDA_HOST_IP", ""),
+        "PANDA_IP": os.environ.get("PANDA_IP", ""),
+        "PRINTER_SN": os.environ.get("PANDA_SN", ""),
+        "ACCESS_CODE": os.environ.get("PANDA_ACCESS_CODE", ""),
+        "HA_BED_TEMPERATURE_ENTITY": os.environ.get("HA_BED_TEMPERATURE_ENTITY", ""),
+        "HA_BASE_URL": os.environ.get("HA_BASE_URL", "http://homeassistant:8123"),
+        "HA_URL": os.environ.get("HA_URL", ""),
+        "HA_TOKEN": os.environ.get("HA_TOKEN", ""),
+        "PRINTER_IP": os.environ.get("PRINTER_IP", os.environ.get("PANDA_IP", "")),
+        "CC2_IP": os.environ.get("CC2_IP", ""),
+        "CC2_TOPIC_PREFIX": os.environ.get("CC2_TOPIC_PREFIX", "cc2"),
+        "CC2_HA_MODE": os.environ.get("CC2_HA_MODE", ""),
+        "CC2_HA_FALLBACK_TEMP": os.environ.get("CC2_HA_FALLBACK_TEMP", "0"),
+    }
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            config.update(json.load(f))
+    return config
+
+CONFIG = _load_config()
 
 # Konsolen-Ausgabe: True zeigt detaillierte MQTT-Befehle im Terminal, False hält es sauber.
 DEBUG = CONFIG["DEBUG"]
@@ -128,14 +163,34 @@ MQTT_PORT = CONFIG.get("MQTT_PORT", int(os.environ.get("HA_MQTT_PORT", 1883)))
 _DEFAULT_FILAMENT_MAP = {
     "PLA":    0,   # no chamber heat — heat creep risk
     "PLA+":   0,
+    "PLA-CF": 0,
+    "PLA-GF": 0,
+    "PET":    35,
+    "PET-CF": 35,
     "PETG":   35,  # light warmth improves adhesion
+    "PETG-CF":35,
+    "PETG-GF":35,
     "ABS":    55,  # warp-prone; needs consistent heat
+    "ABS-CF": 55,
+    "ABS-GF": 55,
     "ASA":    55,  # same family as ABS
+    "ASA-CF": 55,  # carbon-fiber ASA still wants ASA-class chamber heat
+    "ASA-GF": 55,
+    "NYLON":  65,
     "PA":     65,  # nylon; hygroscopic, needs hot chamber
+    "PA6":    65,
+    "PA12":   65,
     "PA-CF":  70,  # CF variant runs slightly hotter
+    "PA-GF":  70,
+    "PA6-CF": 70,
+    "PA6-GF": 70,
     "PA12-CF":70,
+    "PA12-GF":70,
+    "PAHT-CF":70,
     "PC":     70,  # polycarbonate; needs aggressive heat
     "PC-ABS": 65,
+    "PC-CF":  70,
+    "PC-FR":  70,
     "TPU":    0,   # flexible; no chamber heat needed
     "TPE":    0,
 }
@@ -144,6 +199,19 @@ try:
     FILAMENT_CHAMBER_MAP = {**_DEFAULT_FILAMENT_MAP, **json.loads(_raw)} if _raw else _DEFAULT_FILAMENT_MAP
 except Exception:
     FILAMENT_CHAMBER_MAP = _DEFAULT_FILAMENT_MAP
+
+def _resolve_filament_chamber_target(filament_type: str):
+    """Return (target, matched_key) for exact or fuzzy filament names."""
+    if not filament_type:
+        return None, None
+    exact = FILAMENT_CHAMBER_MAP.get(filament_type.upper(), FILAMENT_CHAMBER_MAP.get(filament_type))
+    if exact is not None:
+        return exact, filament_type.upper()
+    upper = filament_type.upper()
+    match = max((k for k in FILAMENT_CHAMBER_MAP if k in upper), key=len, default=None)
+    if match is None:
+        return None, None
+    return FILAMENT_CHAMBER_MAP[match], match
 # ==========================================
 # current_data nutzt jetzt die exakten Namen aus der Hardware (filament_temp/timer)
 current_data = {
@@ -380,11 +448,16 @@ def _handle_cc2_data(cc2_key, val):
             if chamber_target == 0:
                 pending = current_data.get("cc2_pending_filament", "")
                 if pending:
-                    fil_target = FILAMENT_CHAMBER_MAP.get(pending.upper(), FILAMENT_CHAMBER_MAP.get(pending))
+                    fil_target, fil_match = _resolve_filament_chamber_target(pending)
                     if fil_target is not None and fil_target > 0:
                         current_data["chamber_setpoint"] = float(fil_target)
+                        current_data["slicer_soll"] = float(fil_target)
                         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(fil_target), retain=True)
+                        mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_soll", int(fil_target), retain=True)
+                        mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_target_temp", int(fil_target), retain=True)
                         chamber_target = float(fil_target)
+                        if fil_match and fil_match != pending.upper():
+                            log_event(f"[CC2-SLICER] Fuzzy buffered filament match: {pending!r} → {fil_match!r} → {chamber_target:.0f}°C", force_console=True)
                         log_event(f"[CC2-SLICER] Applied buffered filament {pending} → {chamber_target:.0f}°C on print start", force_console=True)
             # Last resort: use fallback temp when filament type is completely unknown
             if chamber_target == 0 and CC2_HA_FALLBACK_TEMP > 0:
@@ -481,7 +554,15 @@ def _handle_cc2_data(cc2_key, val):
             log_event("[CC2-SLICER] Ignoring active_filament_type — slicer_priority_mode off", force_console=True)
             return
         # Deduplicate — the HA poller delivers this every 3s; only act on changes.
-        if val == current_data.get("cc2_pending_filament", ""):
+        # If a print has started and the target is still unset, continue so a
+        # buffered fuzzy match like ASA-CF can still arm the chamber heat.
+        if (
+            val == current_data.get("cc2_pending_filament", "")
+            and not (
+                current_data.get("cc2_print_status", "idle") in _cc2_printing_states
+                and float(current_data.get("chamber_setpoint", 0)) == 0
+            )
+        ):
             return
         # Always buffer the filament type — print_status may not have arrived yet
         # on container restart or MQTT reconnect. The print_start handler will apply it.
@@ -490,21 +571,12 @@ def _handle_cc2_data(cc2_key, val):
         if _cc2_active not in _cc2_printing_states:
             log_event(f"[CC2-SLICER] Buffered filament={val!r} (status={_cc2_active!r}, waiting for print start)", force_console=True)
             return
-        target = FILAMENT_CHAMBER_MAP.get(val.upper(), FILAMENT_CHAMBER_MAP.get(val))
+        target, match = _resolve_filament_chamber_target(val)
         if target is None:
-            # Fuzzy match: find longest map key that appears in the filament name
-            # e.g. "Generic ASA" → "ASA", "PA12-CF Fiber" → "PA12-CF"
-            _upper = val.upper()
-            _match = max(
-                (k for k in FILAMENT_CHAMBER_MAP if k in _upper),
-                key=len, default=None
-            )
-            if _match is not None:
-                target = FILAMENT_CHAMBER_MAP[_match]
-                log_event(f"[CC2-SLICER] Fuzzy filament match: {val!r} → {_match!r} → {target}°C", force_console=True)
-            else:
-                log_event(f"[CC2-SLICER] Unknown filament type {val!r}, no chamber target", force_console=True)
-                return
+            log_event(f"[CC2-SLICER] Unknown filament type {val!r}, no chamber target", force_console=True)
+            return
+        if match and match != val.upper():
+            log_event(f"[CC2-SLICER] Fuzzy filament match: {val!r} → {match!r} → {target}°C", force_console=True)
         current_data["chamber_setpoint"] = float(target)
         current_data["slicer_soll"] = float(target)
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(target), retain=True)
@@ -2335,4 +2407,3 @@ async def main():
 if __name__ == "__main__":
     try: asyncio.run(main())
     except KeyboardInterrupt: print("\n🛑 Stopp.")
-

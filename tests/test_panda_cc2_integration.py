@@ -1,5 +1,6 @@
 """Tests for Panda.py CC2_IP conditional integration."""
 import sys, os, json, importlib.util
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, call
 
 REPO = os.path.join(os.path.dirname(__file__), "..")
@@ -21,10 +22,7 @@ def load_panda(cc2_ip=""):
                     "panda_mod", os.path.join(REPO, "Panda.py")
                 )
                 mod = importlib.util.module_from_spec(spec)
-                try:
-                    spec.loader.exec_module(mod)
-                except Exception:
-                    pass  # Panda.py tries to connect at module level; that's fine
+                spec.loader.exec_module(mod)
                 return mod, mock_instance
 
 
@@ -39,6 +37,7 @@ def _fake_msg(topic, payload):
 
 def test_with_cc2_ip_subscribes_to_cc2_topics():
     mod, mock_client = load_panda(cc2_ip="192.168.1.50")
+    mod._on_mqtt_connect(mock_client, None, None, SimpleNamespace(is_failure=False), None)
     subscribed = [c.args[0] for c in mock_client.subscribe.call_args_list]
     assert any("cc2/#" in s for s in subscribed), f"cc2/# not in subscriptions: {subscribed}"
 
@@ -95,3 +94,57 @@ def test_non_cc2_message_unaffected_by_cc2_handler():
     mod.on_mqtt_message(None, None, msg)
     # Bed temp unchanged (unlock doesn't touch bed_temp)
     assert mod.current_data.get("bed_temp", 0.0) == initial_bed
+
+
+def test_buffered_asa_cf_sets_chamber_target_on_print_start():
+    """ASA-CF resolved while idle must arm chamber heat when CC2 enters preheating."""
+    mod, mock_client = load_panda(cc2_ip="192.168.1.50")
+    mod.mqtt_client = mock_client
+    mod.current_data["slicer_priority_mode"] = True
+    mod.current_data["cc2_print_status"] = "idle"
+    mod.current_data["chamber_setpoint"] = 0.0
+    mod.current_data["cc2_pending_filament"] = "ASA-CF"
+
+    mod._handle_cc2_data("print_status", "preheating")
+
+    assert mod.current_data["chamber_setpoint"] == 55.0
+    assert mod.current_data["slicer_soll"] == 55.0
+    published = {c.args[0]: c.args[1] for c in mock_client.publish.call_args_list}
+    assert published["panda_breath_mod/soll"] == 55
+    assert published["panda_breath_mod/slicer_target_temp"] == 55
+
+
+def test_duplicate_active_asa_cf_after_print_start_still_sets_missing_target():
+    """HA can repeat the same filament after print start; dedupe must not skip an unset target."""
+    mod, mock_client = load_panda(cc2_ip="192.168.1.50")
+    mod.mqtt_client = mock_client
+    mod.current_data["slicer_priority_mode"] = True
+    mod.current_data["cc2_print_status"] = "preheating"
+    mod.current_data["chamber_setpoint"] = 0.0
+    mod.current_data["cc2_pending_filament"] = "ASA-CF"
+
+    mod._handle_cc2_data("active_filament_type", "ASA-CF")
+
+    assert mod.current_data["chamber_setpoint"] == 55.0
+    assert mod.current_data["slicer_soll"] == 55.0
+
+
+def test_cc2_supported_filament_aliases_have_chamber_targets():
+    """Elegoo-supported CC2 material aliases should map to deterministic targets."""
+    mod, _mock_client = load_panda(cc2_ip="192.168.1.50")
+
+    expected = {
+        "PLA-CF": 0,
+        "PET": 35,
+        "PETG-CF": 35,
+        "ABS-GF": 55,
+        "ASA-GF": 55,
+        "NYLON": 65,
+        "PA6": 65,
+        "PAHT-CF": 70,
+        "PC-FR": 70,
+    }
+    for filament, target in expected.items():
+        resolved, match = mod._resolve_filament_chamber_target(filament)
+        assert resolved == target, filament
+        assert match == filament

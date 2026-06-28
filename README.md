@@ -159,12 +159,11 @@ Default filament → chamber temp mapping:
 
 | Filament | Chamber Target |
 |----------|---------------|
-| PLA, PLA+, TPU, TPE | 0°C (off) |
-| PETG | 35°C |
-| ABS, ASA | 55°C |
-| PA | 65°C |
-| PA-CF, PA12-CF, PC | 70°C |
-| PC-ABS | 65°C |
+| PLA, PLA+, PLA-CF, PLA-GF, TPU, TPE | 0°C (off) |
+| PET, PET-CF, PETG, PETG-CF, PETG-GF | 35°C |
+| ABS, ABS-CF, ABS-GF, ASA, ASA-CF, ASA-GF | 55°C |
+| PA, PA6, PA12, Nylon, PC-ABS | 65°C |
+| PA-CF, PA-GF, PA6-CF, PA6-GF, PA12-CF, PA12-GF, PAHT-CF, PC, PC-CF, PC-FR | 70°C |
 
 To override any value, set the `CC2_FILAMENT_MAP` env var as JSON in your `.env`:
 ```env

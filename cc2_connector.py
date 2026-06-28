@@ -176,7 +176,15 @@ def _filament_from_nozzle_temp(target: float) -> str:
 def _filament_from_filename(filename: str) -> str:
     """Extract filament type from filename if the slicer embedded it."""
     upper = filename.upper()
-    for material in ("PA-CF", "PA12-CF", "PC-ABS", "PLA+", "ASA", "ABS", "PETG", "PA", "PC", "TPU", "TPE", "PLA"):
+    materials = (
+        "PAHT-CF", "PA12-CF", "PA12-GF", "PA6-CF", "PA6-GF",
+        "PETG-CF", "PETG-GF", "PET-CF", "PLA-CF", "PLA-GF",
+        "ABS-CF", "ABS-GF", "ASA-CF", "ASA-GF", "PC-ABS",
+        "PC-CF", "PC-FR", "PA-CF", "PA-GF", "PLA+",
+        "NYLON", "PA12", "PA6", "ASA", "ABS", "PETG", "PET",
+        "PA", "PC", "TPU", "TPE", "PLA",
+    )
+    for material in materials:
         if material.replace("-", "_") in upper or material in upper:
             return material
     return ""
@@ -271,8 +279,8 @@ def publish_to_ha() -> None:
             if chamber_temp is None:
                 chamber_temp = 0
 
-            # CC2 uses "print_status" (dict) not "print_stats"
-            print_status_obj = printer_state.get("print_status") or {}
+            # CC2 uses "print_status"; tests and some integrations still expose print_stats.
+            print_status_obj = printer_state.get("print_status") or printer_state.get("print_stats") or {}
             state_str = (print_status_obj.get("state") or "").lower().strip()
             machine_status_obj = printer_state.get("machine_status") or {}
             machine_code = int(machine_status_obj.get("status") or 0)

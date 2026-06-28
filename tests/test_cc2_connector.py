@@ -123,6 +123,20 @@ def test_publish_with_none_ha_client():
     mod.publish_to_ha()  # must not raise
 
 
+def test_filament_from_filename_supports_cc2_material_aliases():
+    mod = load_cc2()
+
+    cases = {
+        "bracket_PETG-CF_0.2mm.gcode": "PETG-CF",
+        "duct_PAHT_CF_0.2mm.gcode": "PAHT-CF",
+        "clip_PC-FR_0.2mm.gcode": "PC-FR",
+        "cover_PET_0.2mm.gcode": "PET",
+        "hinge_NYLON_0.2mm.gcode": "NYLON",
+    }
+    for filename, expected in cases.items():
+        assert mod._filament_from_filename(filename) == expected
+
+
 # ── cc2_on_message parsing paths ─────────────────────────────────────────────
 
 def _make_msg(topic, payload_dict):
