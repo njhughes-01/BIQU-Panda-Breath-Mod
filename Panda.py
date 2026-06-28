@@ -218,6 +218,10 @@ def _resolve_filament_chamber_target(filament_type: str):
     if match is None:
         return None, None
     return FILAMENT_CHAMBER_MAP[match], match
+
+def _format_cc2_target_delta(target, cc2_temp):
+    return f"{float(target) - float(cc2_temp):+.0f}"
+
 # ==========================================
 # current_data nutzt jetzt die exakten Namen aus der Hardware (filament_temp/timer)
 current_data = {
@@ -1857,16 +1861,18 @@ async def update_limits_from_ws():
                                 )
                             elif info == "CC2 Warming...":
                                 _cc2_log = float(current_data.get("cc2_chamber_temp", 0.0))
+                                _cc2_delta_log = _format_cc2_target_delta(target, _cc2_log)
                                 log_event(
                                     f"[CC2-HEAT] PB:{ist:.0f}°C at setpoint but CC2:{_cc2_log:.0f}°C still cold "
-                                    f"(target {target:.0f}°C) — keeping heater on",
+                                    f"(target {target:.0f}°C Δ{_cc2_delta_log}°C) — keeping heater on",
                                     force_console=True
                                 )
                             elif _last_heat_status == "Heating..." and info == "At Temperature":
                                 if CC2_ACTIVE and _cc2_printing:
                                     _cc2_log = float(current_data.get("cc2_chamber_temp", 0.0))
+                                    _cc2_delta_log = _format_cc2_target_delta(target, _cc2_log)
                                     log_event(
-                                        f"[AT-TEMP] PB:{ist:.0f}°C CC2:{_cc2_log:.0f}°C target {target:.0f}°C — heater holding",
+                                        f"[AT-TEMP] PB:{ist:.0f}°C CC2:{_cc2_log:.0f}°C target:{target:.0f}°C Δ{_cc2_delta_log}°C — heater holding",
                                         force_console=True
                                     )
                                 else:
@@ -1878,16 +1884,18 @@ async def update_limits_from_ws():
                                 log_event("[IDLE] No active CC2 print — heater standby", force_console=True)
                             elif info == "At Temperature" and _last_heat_status not in ("Heating...", "CC2 Warming...", ""):
                                 _cc2_log = float(current_data.get("cc2_chamber_temp", 0.0))
+                                _cc2_delta_log = _format_cc2_target_delta(target, _cc2_log)
                                 log_event(
-                                    f"[AT-TEMP] PB:{ist:.0f}°C CC2:{_cc2_log:.0f}°C target:{target:.0f}°C Δ{ist - _cc2_log:+.0f}°C — within hysteresis, holding",
+                                    f"[AT-TEMP] PB:{ist:.0f}°C CC2:{_cc2_log:.0f}°C target:{target:.0f}°C Δ{_cc2_delta_log}°C — within hysteresis, holding",
                                     force_console=True
                                 )
                             _last_heat_status = info
                             _last_heat_log_time = _now_log
                         elif (_now_log - _last_heat_log_time) >= 60:
                             _cc2_log = float(current_data.get("cc2_chamber_temp", 0.0))
+                            _cc2_delta_log = _format_cc2_target_delta(target, _cc2_log)
                             log_event(
-                                f"[STATUS] PB:{ist:.0f}°C CC2:{_cc2_log:.0f}°C target:{target:.0f}°C Δ{ist - _cc2_log:+.0f}°C | "
+                                f"[STATUS] PB:{ist:.0f}°C CC2:{_cc2_log:.0f}°C target:{target:.0f}°C Δ{_cc2_delta_log}°C | "
                                 f"Heat:{'ON' if heating_active else 'OFF'} | {info}",
                                 force_console=True
                             )

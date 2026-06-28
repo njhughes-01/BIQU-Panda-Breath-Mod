@@ -150,6 +150,14 @@ def test_cc2_supported_filament_aliases_have_chamber_targets():
         assert match == filament
 
 
+def test_cc2_target_delta_ignores_panda_overshoot_temp():
+    """Status delta should show CC2 remaining gap, not Panda-to-CC2 spread."""
+    mod, _mock_client = load_panda(cc2_ip="192.168.1.50")
+
+    assert mod._format_cc2_target_delta(55, 43) == "+12"
+    assert mod._format_cc2_target_delta(55, 56) == "-1"
+
+
 def test_ha_discovery_ignores_panda_mirror_sensor_for_cc2_chamber():
     """CC2 chamber source must be the Elegoo entity, not Panda's HA mirror."""
     mod, _mock_client = load_panda(cc2_ip="192.168.1.50")
