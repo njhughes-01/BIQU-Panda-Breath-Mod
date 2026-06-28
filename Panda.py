@@ -655,12 +655,17 @@ def _cc2_press_button(action: str) -> None:
         if eid:
             def _do():
                 try:
-                    requests.post(
+                    response = requests.post(
                         f"{HA_BASE_URL}/api/services/button/press",
                         headers={"Authorization": f"Bearer {HA_TOKEN}"},
                         json={"entity_id": eid},
-                        timeout=3,
+                        timeout=(3, 10),
                     )
+                    if response.status_code >= 400:
+                        log_event(
+                            f"[CC2-HA] {action} button call failed: HTTP {response.status_code} {response.text[:200]}",
+                            force_console=True,
+                        )
                 except Exception as e:
                     log_event(f"[CC2-HA] {action} button call failed: {e}", force_console=True)
             threading.Thread(target=_do, daemon=True).start()
@@ -2253,7 +2258,7 @@ async def ha_cc2_poller():
         "filename":             lambda v: v,
     }
 
-    _log_state = {"last_filename": None, "last_color_unavail": None}
+    _log_state = {"last_filename": None, "last_color_unavail": None, "last_filament": None}
 
     while True:
         try:
@@ -2316,7 +2321,13 @@ async def ha_cc2_poller():
                                     slot_name = rn.json().get("state", "")
                                     if slot_name and slot_name not in ("unknown", "unavailable", ""):
                                         results["active_filament_type"] = slot_name
-                                        log_event(f"[CC2-HA] Active filament resolved: slot={slot} color={active_color} name={slot_name!r}", force_console=True)
+                                        filament_sig = (slot, active_color, slot_name)
+                                        if filament_sig != _log_state["last_filament"]:
+                                            log_event(
+                                                f"[CC2-HA] Active filament resolved: slot={slot} color={active_color} name={slot_name!r}",
+                                                force_console=True,
+                                            )
+                                            _log_state["last_filament"] = filament_sig
                                     else:
                                         log_event(f"[CC2-HA] Color match on slot={slot} but name unavailable", force_console=True)
                                     break
