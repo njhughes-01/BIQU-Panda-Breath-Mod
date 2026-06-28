@@ -148,3 +148,43 @@ def test_cc2_supported_filament_aliases_have_chamber_targets():
         resolved, match = mod._resolve_filament_chamber_target(filament)
         assert resolved == target, filament
         assert match == filament
+
+
+def test_ha_discovery_ignores_panda_mirror_sensor_for_cc2_chamber():
+    """CC2 chamber source must be the Elegoo entity, not Panda's HA mirror."""
+    mod, _mock_client = load_panda(cc2_ip="192.168.1.50")
+
+    states = [
+        {
+            "entity_id": "sensor.panda_breath_mod_cc2_chamber_temp",
+            "state": "26",
+            "attributes": {
+                "device_class": "temperature",
+                "friendly_name": "Panda Breath Mod CC2 Chamber Temp",
+                "object_id": "panda_cc2_chamber_temp",
+            },
+        },
+        {
+            "entity_id": "sensor.elegoo_centauri_carbon_2_chamber_temp",
+            "state": "43",
+            "attributes": {
+                "device_class": "temperature",
+                "friendly_name": "Elegoo Centauri Carbon 2 Chamber Temp",
+            },
+        },
+        {
+            "entity_id": "sensor.elegoo_centauri_carbon_2_print_status",
+            "state": "paused",
+            "attributes": {"friendly_name": "Elegoo Centauri Carbon 2 Print Status"},
+        },
+    ]
+
+    response = MagicMock()
+    response.json.return_value = states
+    response.raise_for_status.return_value = None
+
+    with patch.object(mod.requests, "get", return_value=response):
+        found = mod._discover_ha_cc2_entities()
+
+    assert found["chamber_temp"] == "sensor.elegoo_centauri_carbon_2_chamber_temp"
+    assert found["print_status"] == "sensor.elegoo_centauri_carbon_2_print_status"

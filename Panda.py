@@ -2222,11 +2222,34 @@ def _discover_ha_cc2_entities() -> dict:
         if v:
             found[key] = v
 
-    # Auto-discover remaining by filtering to Elegoo/CC2 candidates
+    def is_panda_published_entity(state: dict) -> bool:
+        attrs = state.get("attributes", {})
+        label = " ".join(
+            str(v).lower()
+            for v in (
+                state.get("entity_id", ""),
+                attrs.get("friendly_name", ""),
+                attrs.get("object_id", ""),
+                attrs.get("unique_id", ""),
+            )
+        )
+        return any(
+            marker in label
+            for marker in (
+                "panda_breath_mod",
+                "panda_cc2_",
+                "panda chamber temp",
+                "panda nozzle temp",
+                "panda bed temp",
+            )
+        )
+
+    # Auto-discover remaining by filtering to Elegoo/CC2 candidates. Ignore
+    # Panda's own HA mirror sensors so CC2 data cannot loop back into itself.
     cc2_markers = {"elegoo", "centauri", "carbon", "cc2"}
     candidates = [
         s for s in all_states
-        if any(
+        if not is_panda_published_entity(s) and any(
             m in s["entity_id"].lower() or
             m in s.get("attributes", {}).get("friendly_name", "").lower()
             for m in cc2_markers
