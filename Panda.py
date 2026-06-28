@@ -109,10 +109,10 @@ CC2_OVERSHOOT_MAX_DELTA = float(CONFIG.get("CC2_OVERSHOOT_MAX_DELTA",
 CC2_OVERSHOOT_MIN_DELTA = float(CONFIG.get("CC2_OVERSHOOT_MIN_DELTA",
                                             os.environ.get("CC2_OVERSHOOT_MIN_DELTA", "7")))
 # How many °C below target the CC2 chamber sensor must reach before resuming the paused print.
-# Default 5 = resume when CC2 sensor ≥ target - 5 (e.g. ≥ 50°C for ASA 55°C target).
+# Default 7 = resume when CC2 sensor ≥ target - 7 (e.g. ≥ 48°C for ASA 55°C target).
 # CC2 box_temp is the authoritative chamber reading; PB sensor is near the heater and runs hotter.
 CC2_RESUME_OFFSET = float(CONFIG.get("CC2_RESUME_OFFSET",
-                                      os.environ.get("CC2_RESUME_OFFSET", "5")))
+                                      os.environ.get("CC2_RESUME_OFFSET", "7")))
 # MQTT Broker Adresse: Die IP-Adresse deines Home Assistant oder MQTT-Servers.
 MQTT_BROKER = CONFIG["MQTT_BROKER"]
 # MQTT Benutzername: In HA unter Einstellungen -> Personen -> Benutzer angelegt.
@@ -221,6 +221,12 @@ def _resolve_filament_chamber_target(filament_type: str):
 
 def _format_cc2_target_delta(target, cc2_temp):
     return f"{float(target) - float(cc2_temp):+.0f}"
+
+def _cc2_real_chamber_target():
+    slicer_target = safe_float(current_data.get("slicer_soll", 0.0), 0.0)
+    if CC2_ACTIVE and current_data.get("slicer_priority_mode", False) and slicer_target > 0:
+        return slicer_target
+    return safe_float(current_data.get("chamber_setpoint", 0.0), 0.0)
 
 # ==========================================
 # current_data nutzt jetzt die exakten Namen aus der Hardware (filament_temp/timer)
@@ -453,7 +459,7 @@ def _handle_cc2_data(cc2_key, val):
         # Re-arm heating when print starts — handles retained active_filament_type
         # arriving before print_status on MQTT reconnect or container restart
         elif prev_status not in _cc2_printing_states and new_status in _cc2_printing_states:
-            chamber_target = float(current_data.get("chamber_setpoint", 0))
+            chamber_target = _cc2_real_chamber_target()
             # If chamber_setpoint not set yet, apply any buffered filament type
             if chamber_target == 0:
                 pending = current_data.get("cc2_pending_filament", "")
@@ -528,7 +534,7 @@ def _handle_cc2_data(cc2_key, val):
         # CC2 transitioned preheating → printing while we're still waiting for chamber warmup.
         # The pause button is ignored during preheating — re-send now that it's actually printing.
         elif cc2_paused_for_preheat and prev_status == "preheating" and new_status == "printing":
-            chamber_target = float(current_data.get("chamber_setpoint", 0))
+            chamber_target = _cc2_real_chamber_target()
             chamber_now = safe_float(current_data.get("chamber_temp", 0), 0)
             cc2_chamber_now = safe_float(current_data.get("cc2_chamber_temp", 0.0), 0.0)
             _pb_ok = chamber_now > 1.0
@@ -1414,7 +1420,7 @@ async def update_limits_from_ws():
                             # Re-sync heating state after reconnect, but only if there is
                             # an active CC2 print. Stale retained MQTT chamber_setpoint from a
                             # previous session must not trigger heating when the printer is idle.
-                            chamber_target = float(current_data.get("chamber_setpoint", 0))
+                            chamber_target = _cc2_real_chamber_target()
                             _reconnect_printing = (not CC2_ACTIVE) or current_data.get("cc2_print_status", "idle") in {
                                 "printing", "preheating", "paused", "pausing", "resuming", "stopping"
                             }
@@ -1467,7 +1473,7 @@ async def update_limits_from_ws():
                         # to accelerate heat soak. Once CC2 is within CC2_RESUME_OFFSET of target,
                         # drop PB back to real target then resume the print.
                         if cc2_paused_for_preheat:
-                            _target = float(current_data.get("chamber_setpoint", 0))
+                            _target = _cc2_real_chamber_target()
                             _pb_ist = float(current_data.get("chamber_temp", 0))
                             _cc2_ist_raw = float(current_data.get("cc2_chamber_temp", 0.0))
                             _cc2_has_data = _cc2_ist_raw > 5.0
@@ -1547,6 +1553,8 @@ async def update_limits_from_ws():
                             }
                             if CC2_ACTIVE and not _cc2_active_now:
                                 pass  # skip set_temp sync when idle in CC2 mode
+                            elif CC2_ACTIVE and slicer_active:
+                                pass  # CC2 set_temp may be a temporary overshoot; filament/slicer_soll owns target
                             elif slicer_active:
                                 if ws_temp > 0:
                                     current_data["chamber_setpoint"] = ws_temp
@@ -1690,7 +1698,7 @@ async def update_limits_from_ws():
                                 retain=True
                             )
 
-                        target = float(current_data.get("chamber_setpoint", 0))
+                        target = _cc2_real_chamber_target()
                         ist = float(current_data.get("chamber_temp", 0))
                         limit = float(current_data.get("bed_limit", 50))
                         bed_ist = float(current_data.get("bed_temp", 0))

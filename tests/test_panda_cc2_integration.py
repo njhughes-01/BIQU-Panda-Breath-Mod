@@ -158,6 +158,18 @@ def test_cc2_target_delta_ignores_panda_overshoot_temp():
     assert mod._format_cc2_target_delta(55, 56) == "-1"
 
 
+def test_cc2_real_target_ignores_temporary_panda_overshoot_setpoint():
+    """Resume threshold should use filament target, not temporary Panda set_temp."""
+    mod, _mock_client = load_panda(cc2_ip="192.168.1.50")
+
+    mod.current_data["slicer_priority_mode"] = True
+    mod.current_data["slicer_soll"] = 55.0
+    mod.current_data["chamber_setpoint"] = 60.0
+
+    assert mod._cc2_real_chamber_target() == 55.0
+    assert 48.0 >= (mod._cc2_real_chamber_target() - mod.CC2_RESUME_OFFSET)
+
+
 def test_ha_discovery_ignores_panda_mirror_sensor_for_cc2_chamber():
     """CC2 chamber source must be the Elegoo entity, not Panda's HA mirror."""
     mod, _mock_client = load_panda(cc2_ip="192.168.1.50")
