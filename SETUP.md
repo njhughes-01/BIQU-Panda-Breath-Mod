@@ -164,6 +164,8 @@ All of the above, plus:
 | `HA_CC2_STATUS_ENTITY` | no | _auto-discovered_ | Override CC2 print status entity |
 | `HA_CC2_PAUSE_ENTITY` | no | _auto-discovered_ | Override CC2 pause button entity |
 | `HA_CC2_RESUME_ENTITY` | no | _auto-discovered_ | Override CC2 resume button entity |
+| `CC2_IP` / `CC2_SN` | recommended | — | Enables direct pause/resume control when HA button calls time out |
+| `CC2_USER` / `CC2_PASS` | no | `elegoo` / `123456` | Direct CC2 MQTT credentials for pause/resume fallback |
 
 ---
 

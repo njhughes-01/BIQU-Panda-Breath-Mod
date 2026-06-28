@@ -47,6 +47,9 @@ services:
       PANDA_HOST_IP: ${PANDA_HOST_IP:-}
       PANDA_MQTT_TOPIC_PREFIX: ${PANDA_MQTT_TOPIC_PREFIX:-panda_breath_mod}
       CC2_IP: ${CC2_IP:-}
+      CC2_SN: ${CC2_SN:-}
+      CC2_USER: ${CC2_USER:-elegoo}
+      CC2_PASS: ${CC2_PASS:-123456}
       CC2_HA_MODE: ${CC2_HA_MODE:-}
       CC2_TOPIC_PREFIX: ${CC2_TOPIC_PREFIX:-cc2}
     volumes:

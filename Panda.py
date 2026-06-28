@@ -71,6 +71,9 @@ def _load_config():
         "HA_TOKEN": os.environ.get("HA_TOKEN", ""),
         "PRINTER_IP": os.environ.get("PRINTER_IP", os.environ.get("PANDA_IP", "")),
         "CC2_IP": os.environ.get("CC2_IP", ""),
+        "CC2_SN": os.environ.get("CC2_SN", ""),
+        "CC2_USER": os.environ.get("CC2_USER", "elegoo"),
+        "CC2_PASS": os.environ.get("CC2_PASS", "123456"),
         "CC2_TOPIC_PREFIX": os.environ.get("CC2_TOPIC_PREFIX", "cc2"),
         "CC2_HA_MODE": os.environ.get("CC2_HA_MODE", ""),
         "CC2_HA_FALLBACK_TEMP": os.environ.get("CC2_HA_FALLBACK_TEMP", "0"),
@@ -149,6 +152,9 @@ HA_TOKEN = CONFIG["HA_TOKEN"]
 # ============================================================
 PRINTER_IP = CONFIG["PRINTER_IP"]
 CC2_IP = CONFIG.get("CC2_IP", os.environ.get("CC2_IP", ""))
+CC2_SN = CONFIG.get("CC2_SN", os.environ.get("CC2_SN", ""))
+CC2_USER = CONFIG.get("CC2_USER", os.environ.get("CC2_USER", "elegoo"))
+CC2_PASS = CONFIG.get("CC2_PASS", os.environ.get("CC2_PASS", "123456"))
 CC2_TOPIC_PREFIX = CONFIG.get("CC2_TOPIC_PREFIX", os.environ.get("CC2_TOPIC_PREFIX", "cc2"))
 CC2_HA_MODE = CONFIG.get("CC2_HA_MODE", os.environ.get("CC2_HA_MODE", "")).lower() in ("true", "1", "yes")
 CC2_ACTIVE = bool(CC2_IP) or CC2_HA_MODE
@@ -649,6 +655,46 @@ def _handle_cc2_data(cc2_key, val):
 
 def _cc2_press_button(action: str) -> None:
     """Pause or resume the CC2 — via MQTT in direct mode, HA service call in HA mode."""
+    method = 1021 if action == "pause" else 1023
+    if CC2_IP and CC2_SN:
+        def _direct():
+            client_id = f"pb{format(int(time.time() * 1000), 'x')[-8:]}"
+            request_id = f"{format(int(time.time() * 1000), 'x')}{client_id}"
+            client = mqtt.Client(
+                callback_api_version=CallbackAPIVersion.VERSION2,
+                client_id=client_id,
+                clean_session=True,
+            )
+            try:
+                client.username_pw_set(CC2_USER, CC2_PASS)
+                client.connect(CC2_IP, 1883, keepalive=30)
+                client.loop_start()
+                client.publish(
+                    f"elegoo/{CC2_SN}/api_register",
+                    json.dumps({"client_id": client_id, "request_id": request_id}),
+                    qos=1,
+                ).wait_for_publish(timeout=2.0)
+                time.sleep(0.4)
+                result = client.publish(
+                    f"elegoo/{CC2_SN}/{client_id}/api_request",
+                    json.dumps({"id": int(time.time() * 1000) % 1000000, "method": method}),
+                    qos=1,
+                )
+                result.wait_for_publish(timeout=2.0)
+                log_event(f"[CC2-DIRECT] {action} command sent method={method}", force_console=True)
+                return True
+            except Exception as e:
+                log_event(f"[CC2-DIRECT] {action} command failed: {e}", force_console=True)
+                return False
+            finally:
+                try:
+                    client.loop_stop()
+                    client.disconnect()
+                except Exception:
+                    pass
+        threading.Thread(target=_direct, daemon=True).start()
+        return
+
     if CC2_HA_MODE:
         key = "_pause_button" if action == "pause" else "_resume_button"
         eid = _ha_cc2_entities.get(key)
