@@ -170,6 +170,25 @@ def test_cc2_real_target_ignores_temporary_panda_overshoot_setpoint():
     assert 48.0 >= (mod._cc2_real_chamber_target() - mod.CC2_RESUME_OFFSET)
 
 
+def test_resume_ready_printing_transition_does_not_repause():
+    """At the resume threshold, a preheating→printing transition must not re-pause CC2."""
+    mod, mock_client = load_panda(cc2_ip="192.168.1.50")
+    mod.mqtt_client = mock_client
+    mod.cc2_paused_for_preheat = True
+    mod.current_data["slicer_priority_mode"] = True
+    mod.current_data["slicer_soll"] = 55.0
+    mod.current_data["chamber_setpoint"] = 60.0
+    mod.current_data["chamber_temp"] = 60.0
+    mod.current_data["cc2_chamber_temp"] = 48.0
+    mod.current_data["cc2_print_status"] = "preheating"
+
+    with patch.object(mod, "_cc2_press_button") as press_button:
+        mod._handle_cc2_data("print_status", "printing")
+
+    press_button.assert_not_called()
+    assert mod.cc2_paused_for_preheat is False
+
+
 def test_ha_discovery_ignores_panda_mirror_sensor_for_cc2_chamber():
     """CC2 chamber source must be the Elegoo entity, not Panda's HA mirror."""
     mod, _mock_client = load_panda(cc2_ip="192.168.1.50")

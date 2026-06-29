@@ -265,6 +265,7 @@ main_loop = None
 cc2_paused_for_preheat = False  # True when we paused the CC2 to wait for chamber temp
 _preheat_overshoot_temp = 0    # set_temp sent to Panda Breath during preheat (target + overshoot delta)
 _cc2_dynamic_overshoot_active = False  # True when CC2 far cold mid-print — boost PB to PANDA_MAX_TEMP
+_last_cc2_resume_attempt = 0.0
 
 PREHEAT_STATE_FILE = BASE_DIR / "preheat_state.json"
 PREHEAT_STATE_MAX_AGE = 43200  # 12h — discard persisted state older than this
@@ -300,6 +301,13 @@ def _load_preheat_state():
         log_event(f"[PREHEAT-STATE] Load failed: {_e}")
 
 _load_preheat_state()
+
+def _clear_cc2_preheat_state():
+    global cc2_paused_for_preheat, _preheat_overshoot_temp
+    cc2_paused_for_preheat = False
+    _preheat_overshoot_temp = 0
+    _save_preheat_state()
+
 terminal_cleared = False
 # Merkt sich den letzten vollständigen WS-Settings-Stand
 last_ws_settings = {}
@@ -447,9 +455,7 @@ def _handle_cc2_data(cc2_key, val):
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_target_temp", 0, retain=True)
             log_event(f"[CC2-SLICER] Print ended ({prev_status}→{new_status}), turning off chamber heater", force_console=True)
             if cc2_paused_for_preheat:
-                cc2_paused_for_preheat = False
-                _preheat_overshoot_temp = 0
-                _save_preheat_state()
+                _clear_cc2_preheat_state()
             async def _cc2_off():
                 try:
                     await panda_send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "set_temp": 0}}))
@@ -545,9 +551,12 @@ def _handle_cc2_data(cc2_key, val):
                 _eff = chamber_now
             else:
                 _eff = 0.0
-            if chamber_target > 0 and _eff < (chamber_target - 5):
+            if chamber_target > 0 and _eff < (chamber_target - CC2_RESUME_OFFSET):
                 log_event(f"[CC2-SLICER] CC2 started printing (was preheating) but chamber cold ({_eff:.0f}°C) — re-sending pause", force_console=True)
                 _cc2_press_button("pause")
+            elif chamber_target > 0:
+                log_event(f"[CC2-SLICER] CC2 started printing and chamber is resume-ready ({_eff:.0f}°C), keeping print running", force_console=True)
+                _clear_cc2_preheat_state()
     elif cc2_key == "filename":
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/cc2_filename", val, retain=True)
         if val:
@@ -1323,7 +1332,7 @@ async def update_limits_from_ws():
     global global_heating_state, last_switch_time
     global last_live_log_state, last_live_log_time
     global last_stop_command_time, cc2_paused_for_preheat, _preheat_overshoot_temp
-    global _cc2_dynamic_overshoot_active
+    global _cc2_dynamic_overshoot_active, _last_cc2_resume_attempt
     global _last_heat_status, _last_heat_log_time
     global _ws_bind_time
     uri = f"ws://{PANDA_IP}/ws"
@@ -1496,16 +1505,15 @@ async def update_limits_from_ws():
                                 except Exception as _e:
                                     log_event(f"[CC2-SLICER] Drop-to-target error: {_e}", force_console=True)
                                 _cc2_status_now = current_data.get("cc2_print_status", "")
-                                if _cc2_status_now in ("paused", "pausing"):
-                                    cc2_paused_for_preheat = False
-                                    _preheat_overshoot_temp = 0
-                                    _save_preheat_state()
-                                    _cc2_press_button("resume")
+                                if _cc2_status_now in ("paused", "pausing", "preheating"):
+                                    _now = time.time()
+                                    if _now - _last_cc2_resume_attempt >= 15:
+                                        _last_cc2_resume_attempt = _now
+                                        _cc2_press_button("resume")
+                                    else:
+                                        log_event(f"[CC2-SLICER] Resume already attempted recently while CC2 status={_cc2_status_now!r} — waiting for confirmation", force_console=True)
                                 elif _cc2_status_now in ("printing", "resuming"):
-                                    # User already resumed manually — clear preheat state, no-op
-                                    cc2_paused_for_preheat = False
-                                    _preheat_overshoot_temp = 0
-                                    _save_preheat_state()
+                                    _clear_cc2_preheat_state()
                                     log_event(f"[CC2-SLICER] Chamber ready, CC2 already {_cc2_status_now} — clearing preheat state", force_console=True)
                                 else:
                                     # Transient state (stopping, initializing, etc.) — keep flag, retry next cycle
