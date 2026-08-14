@@ -51,7 +51,7 @@ export COMPOSE_PROJECT_NAME
 
 COMPOSE=(docker-compose -p "$COMPOSE_PROJECT_NAME" -f "$SCRIPT_DIR/docker-compose.test.yml")
 
-cleanup() { "${COMPOSE[@]}" down -v --remove-orphans 2>/dev/null || true; }
+cleanup() { "${COMPOSE[@]}" down -v --remove-orphans --rmi local 2>/dev/null || true; }
 trap cleanup EXIT
 
 "${COMPOSE[@]}" build
