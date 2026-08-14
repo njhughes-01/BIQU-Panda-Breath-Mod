@@ -1,0 +1,9 @@
+services:
+  tests:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    command: python3 -m pytest -v
+    environment:
+      HA_MQTT_BROKER: ""
+      PANDA_MQTT_TOPIC_PREFIX: panda_breath_mod

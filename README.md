@@ -3,7 +3,7 @@
 <!-- REPO_VIEWS_BADGE_END -->
 
 # BIQU Panda Breath Mod 🚀
-### Panda Logic Sync v1.9.3 (Bug Fix Release)
+### Panda Logic Sync v2.0.0
 
 Intelligent control system for the **BIQU Panda Breath** chamber heater.
 
@@ -23,12 +23,12 @@ This project simulates a **Bambu Lab printer** on a host system (PC / server) an
 
 ---
 
-# ✨ Key Features (v1.9.3)
+# ✨ Key Features (v2.0.0)
 
 - 🔥 Immediate heating in all modes (no bed wait)
 - 🔐 Global lock / unlock safety system
 - ⚡ Stable power sync (no UI bounce or reset)
-- 🧠 Slicer Priority Mode (M191 / M141 detection via Moonraker)
+- 🧠 Slicer Priority Mode — CC2: automatic filament-type detection from AMS tray; Klipper: M191 / M141 via Moonraker
 - 🔄 Full bidirectional MQTT sync (Home Assistant auto-discovery)
 - 🎛 Dry mode support
 - 📊 Live terminal monitor (flicker-free)
@@ -81,9 +81,13 @@ Printer IP → 192.168.8.8
 
 The script emulates a **Bambu-compatible printer** using Panda WebSocket protocol.
 
-**Data flow:**
+**Data flow (Klipper/Moonraker setup):**
 
-Moonraker → Home Assistant → Panda Logic Sync → Panda Touch
+Moonraker → Home Assistant → Panda Logic Sync → MQTT → Chamber Heater
+
+**Data flow (Elegoo CC2 setup):**
+
+CC2 Printer → cc2_backend → Home Assistant MQTT → Panda Logic Sync → Chamber Heater
 
 
 ---
@@ -143,20 +147,132 @@ Fixes:
 
 ---
 
-# 🧩 Slicer Integration (OrcaSlicer)
+# 🧩 Slicer Priority Mode
 
-Supports:
+Automatically sets the Chamber Target when a print starts — no manual input needed.
 
-M191 Sxx
-M141 Sxx
+### CC2 Setup (no OrcaSlicer changes required)
 
+Enable **Slicer Priority Mode** in Home Assistant and set Panda to **Auto** mode. When a print starts, the CC2 backend reads the active AMS tray's filament type and maps it to the correct chamber temperature automatically.
 
-When **Slicer Priority Mode = ON**:
-- Automatically sets chamber target
+Default filament → chamber temp mapping:
+
+| Filament | Chamber Target |
+|----------|---------------|
+| PLA, PLA+, PLA-CF, PLA-GF, TPU, TPE | 0°C (off) |
+| PET, PET-CF, PETG, PETG-CF, PETG-GF | 35°C |
+| ABS, ABS-CF, ABS-GF, ASA, ASA-CF, ASA-GF | 55°C |
+| PA, PA6, PA12, Nylon, PC-ABS | 65°C |
+| PA-CF, PA-GF, PA6-CF, PA6-GF, PA12-CF, PA12-GF, PAHT-CF, PC, PC-CF, PC-FR | 70°C |
+
+To override any value, set the `CC2_FILAMENT_MAP` env var as JSON in your `.env`:
+```env
+CC2_FILAMENT_MAP={"PETG":"40","ABS":"60"}
+```
+Unmapped filaments fall back to the defaults above.
+
+### Klipper/Moonraker Setup
+
+When **Slicer Priority Mode = ON**, the backend polls Moonraker for M191/M141 commands in the active G-code:
+
+```
+M191 Sxx   (chamber temp)
+M141 Sxx   (enclosure temp)
+```
+
+**OrcaSlicer:** Go to *Filament → Custom G-code → Start G-code* and add `M191 S[chamber_temperature]`. Set your desired chamber temp per filament profile under *Filament → Temperature → Chamber*.
 
 ---
 
-# 📦 Installation
+# 🐳 Docker Deployment (Recommended)
+
+No Python environment setup required on the host. A pre-built multi-arch image (`linux/amd64`, `linux/arm64`) is published to GitHub Container Registry.
+
+Choose the setup that matches your printer:
+
+---
+
+## Setup A — Klipper/Moonraker (with optional Panda Touch)
+
+```bash
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/main/.env.example
+cp .env.example .env
+nano .env   # fill in PANDA_IP, PANDA_SN, PANDA_ACCESS_CODE, HA_TOKEN
+
+docker compose up -d
+```
+
+**Minimum `.env` for this setup:**
+
+```env
+PANDA_IP=10.0.0.x
+PANDA_SN=YOUR_SERIAL
+PANDA_ACCESS_CODE=YOUR_CODE
+HA_TOKEN=YOUR_HA_TOKEN
+```
+
+If you have a Panda Touch display: use Klipper/direct binding (do not scan), set `Printer IP` to the Docker host LAN IP shown in the `panda_backend` container logs. A Panda Touch is not required — the system works without one.
+
+---
+
+## Setup B — Elegoo Centauri Carbon 2 (no Panda Touch required)
+
+> **LAN-only mode required on the CC2:** Settings → Network → LAN Only Mode → Enable
+
+```bash
+curl https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/main/docker-compose.cc2.yml -o docker-compose.yml
+curl -O https://raw.githubusercontent.com/njhughes-01/BIQU-Panda-Breath-Mod/main/.env.example
+cp .env.example .env
+nano .env   # fill in Panda vars + uncomment CC2_IP, CC2_SN
+
+docker compose up -d
+```
+
+`docker-compose.cc2.yml` is a complete self-contained stack (Panda backend, web UI, and CC2 backend). Just curl it as `docker-compose.yml` — no second file needed. Works with Portainer too.
+
+**Minimum `.env` for this setup:**
+
+```env
+PANDA_IP=10.0.0.x
+PANDA_SN=YOUR_PANDA_SERIAL
+PANDA_ACCESS_CODE=YOUR_PANDA_CODE
+HA_TOKEN=YOUR_HA_TOKEN
+CC2_IP=10.0.0.y
+CC2_SN=YOUR_CC2_SERIAL
+```
+
+**Automated slicer priority:** Enable **Slicer Priority Mode** in the Panda Breath Mod HA device and set the Panda to **Auto** mode. When a print starts the system reads the active AMS tray and sets the chamber target automatically — no OrcaSlicer changes needed. See the [Slicer Priority Mode](#-slicer-priority-mode) section for the filament→temp defaults.
+
+**CC2 sensors published to Home Assistant:**
+
+| Sensor | Unit |
+|--------|------|
+| Nozzle Temperature | °C |
+| Nozzle Target | °C |
+| Bed Temperature | °C |
+| Bed Target | °C |
+| Chamber Temperature | °C |
+| Print Status | — |
+| Print Progress | % |
+
+---
+
+## Version pinning
+
+To lock to a specific release, edit the `image:` line in your compose file(s):
+
+```yaml
+image: ghcr.io/njhughes-01/biqu-panda-breath-mod:2.0.0
+```
+
+Available tags: [ghcr.io/njhughes-01/biqu-panda-breath-mod](https://github.com/njhughes-01/BIQU-Panda-Breath-Mod/pkgs/container/biqu-panda-breath-mod) — see [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
+
+See **[SETUP.md](SETUP.md)** for full configuration details and Home Assistant verification steps.
+
+---
+
+# 📦 Manual Installation
 
 ## 1. Clone
 ```bash
@@ -289,4 +405,3 @@ MIT License
 
 Use at your own risk.
 Always follow fire safety regulations when operating heated 3D printer enclosures.
-

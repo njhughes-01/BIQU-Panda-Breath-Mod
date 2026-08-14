@@ -1,0 +1,63 @@
+# Standard deployment: panda_backend + panda_web
+# Pulls pre-built image from GitHub Container Registry — no local build required.
+#
+# To add the Elegoo CC2 backend:
+#   docker compose -f docker-compose.yml -f docker-compose.cc2.yml up -d
+
+services:
+  panda_backend:
+    container_name: panda_backend
+    # To pin to a specific release: image: ghcr.io/njhughes-01/biqu-panda-breath-mod:2.0.0
+    image: ghcr.io/njhughes-01/biqu-panda-breath-mod:latest
+    command: python3 Panda.py
+    restart: unless-stopped
+    ports:
+      - "8883:8883"
+    environment:
+      HA_MQTT_BROKER: ${HA_MQTT_BROKER:-mosquitto}
+      HA_MQTT_PORT: ${HA_MQTT_PORT:-1883}
+      HA_MQTT_USER: ${HA_MQTT_USER:-}
+      HA_MQTT_PASS: ${HA_MQTT_PASS:-}
+      HA_BASE_URL: ${HA_BASE_URL:-http://homeassistant:8123}
+      HA_TOKEN: ${HA_TOKEN:-}
+      PANDA_IP: ${PANDA_IP:-}
+      PANDA_SN: ${PANDA_SN:-}
+      PANDA_ACCESS_CODE: ${PANDA_ACCESS_CODE:-}
+      PANDA_HOST_IP: ${PANDA_HOST_IP:-}
+      PANDA_MQTT_TOPIC_PREFIX: ${PANDA_MQTT_TOPIC_PREFIX:-panda_breath_mod}
+      CC2_IP: ${CC2_IP:-}
+      CC2_SN: ${CC2_SN:-}
+      CC2_USER: ${CC2_USER:-elegoo}
+      CC2_PASS: ${CC2_PASS:-123456}
+      CC2_TOPIC_PREFIX: ${CC2_TOPIC_PREFIX:-cc2}
+    volumes:
+      - panda_certs:/app/certs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  panda_web:
+    container_name: panda_web
+    # To pin to a specific release: image: ghcr.io/njhughes-01/biqu-panda-breath-mod:2.0.0
+    image: ghcr.io/njhughes-01/biqu-panda-breath-mod:latest
+    command: python3 panda_web.py
+    restart: unless-stopped
+    ports:
+      - "${PANDA_WEB_PORT:-8088}:8080"
+    environment:
+      HA_MQTT_BROKER: ${HA_MQTT_BROKER:-mosquitto}
+      HA_MQTT_PORT: ${HA_MQTT_PORT:-1883}
+      HA_MQTT_USER: ${HA_MQTT_USER:-}
+      HA_MQTT_PASS: ${HA_MQTT_PASS:-}
+      PANDA_MQTT_TOPIC_PREFIX: ${PANDA_MQTT_TOPIC_PREFIX:-panda_breath_mod}
+      PANDA_WEB_INTERNAL_PORT: 8080
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  panda_certs:
