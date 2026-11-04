@@ -160,7 +160,8 @@ Default filament → chamber temp mapping:
 | Filament | Chamber Target |
 |----------|---------------|
 | PLA, PLA+, PLA-CF, PLA-GF, TPU, TPE | 0°C (off) |
-| PET, PET-CF, PETG, PETG-CF, PETG-GF | 35°C |
+| PET, PET-CF | 35°C |
+| PETG, PETG-CF, PETG-GF | Off |
 | ABS, ABS-CF, ABS-GF, ASA, ASA-CF, ASA-GF | 55°C |
 | PA, PA6, PA12, Nylon, PC-ABS | 65°C |
 | PA-CF, PA-GF, PA6-CF, PA6-GF, PA12-CF, PA12-GF, PAHT-CF, PC, PC-CF, PC-FR | 70°C |

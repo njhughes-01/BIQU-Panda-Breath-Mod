@@ -173,9 +173,9 @@ _DEFAULT_FILAMENT_MAP = {
     "PLA-GF": 0,
     "PET":    35,
     "PET-CF": 35,
-    "PETG":   35,  # light warmth improves adhesion
-    "PETG-CF":35,
-    "PETG-GF":35,
+    "PETG":   0,   # no active chamber heat
+    "PETG-CF":0,
+    "PETG-GF":0,
     "ABS":    55,  # warp-prone; needs consistent heat
     "ABS-CF": 55,
     "ABS-GF": 55,
@@ -482,11 +482,13 @@ def _handle_cc2_data(cc2_key, val):
                             log_event(f"[CC2-SLICER] Fuzzy buffered filament match: {pending!r} → {fil_match!r} → {chamber_target:.0f}°C", force_console=True)
                         log_event(f"[CC2-SLICER] Applied buffered filament {pending} → {chamber_target:.0f}°C on print start", force_console=True)
             # Last resort: use fallback temp when filament type is completely unknown
-            if chamber_target == 0 and CC2_HA_FALLBACK_TEMP > 0:
+            pending = current_data.get("cc2_pending_filament", "")
+            pending_target, _ = _resolve_filament_chamber_target(pending)
+            if chamber_target == 0 and pending_target is None and CC2_HA_FALLBACK_TEMP > 0:
                 chamber_target = CC2_HA_FALLBACK_TEMP
                 current_data["chamber_setpoint"] = chamber_target
                 log_event(f"[CC2-SLICER] Filament type unknown — using fallback target {chamber_target:.0f}°C (set CC2_HA_FALLBACK_TEMP=0 to disable)", force_console=True)
-            elif chamber_target == 0:
+            elif chamber_target == 0 and pending_target is None:
                 log_event(f"[CC2-SLICER] Print started but no chamber target set — filament type not resolved, no preheat. Set CC2_HA_FALLBACK_TEMP to enable safety fallback.", force_console=True)
             if chamber_target > 0 and (panda_ws or panda_writer):
                 chamber_now = safe_float(current_data.get("chamber_temp", 0), 0)
