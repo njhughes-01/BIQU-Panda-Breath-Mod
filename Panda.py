@@ -300,7 +300,6 @@ def _load_preheat_state():
     except Exception as _e:
         log_event(f"[PREHEAT-STATE] Load failed: {_e}")
 
-_load_preheat_state()
 
 def _clear_cc2_preheat_state():
     global cc2_paused_for_preheat, _preheat_overshoot_temp
@@ -363,6 +362,8 @@ def log_event(msg, force_console=False):
     except Exception:
         pass
             
+_load_preheat_state()
+
 # --- HELPER ---
 def safe_float(v, default=0.0):
     try:
