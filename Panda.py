@@ -929,7 +929,7 @@ def on_mqtt_message(client, userdata, msg):
         # must never start a native device operation.
         log_event(f"[NATIVE] Retained control input ignored: {msg.topic}")
         return
-    if msg.topic.rsplit('/', 2)[-2:] in (["heat_stop", "set"], ["work_on", "set"], ["panda_power", "set"], ["drying", "set"], ["manual", "set"], ["auto", "set"]):
+    if msg.topic.rsplit('/', 2)[-2:] in (["heat_stop", "set"], ["work_on", "set"], ["panda_power", "set"], ["drying", "set"], ["manual", "set"], ["auto", "set"], ["mode_select", "set"]):
         _dry_generation += 1
     # ✅ FIX: Alle globalen Deklarationen MÜSSEN am Anfang der Funktion stehen
     global current_data

@@ -435,6 +435,10 @@ class NativePandaTransport:
         if not isinstance(settings, dict):
             self._log(f"[NATIVE-MQTT] non-settings envelope not sent: {list(envelope)}")
             return False
+        # Stop intent cancels an in-flight start even when the current mode
+        # makes isrunning=0 a wire-level no-op.
+        if settings.get("isrunning") in (0, False):
+            self._stop_generation += 1
         cmds = self._translate(settings)
         if cmds is None:
             return False                       # rejected atomically: nothing published

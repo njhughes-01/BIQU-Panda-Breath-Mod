@@ -814,7 +814,8 @@ def test_uncertain_latch_not_cleared_by_pre_start_cached_packet():
     asyncio.run(scenario())
 
 
-def test_stop_overtakes_a_waiting_start():
+@pytest.mark.parametrize("stop_settings", [{"work_on": False, "work_mode": 0}, {"isrunning": 0}])
+def test_stop_overtakes_a_waiting_start(stop_settings):
     """An emergency stop must not queue behind the 10s config wait, and the waiting
     start must not publish drying_running ON afterwards."""
     async def scenario():
@@ -838,13 +839,20 @@ def test_stop_overtakes_a_waiting_start():
         loop = asyncio.get_running_loop()
 
         async def stop_now():
-            return await tr.send(json.dumps({"settings": {"work_on": False, "work_mode": 0}}))
+            return await tr.send(json.dumps({"settings": stop_settings}))
         stop_task = asyncio.ensure_future(stop_now())
         done, _ = await asyncio.wait([stop_task], timeout=1.0)
         assert stop_task in done, "stop blocked behind the dry-start wait"
         assert stop_task.result() is True
         off_seen = any(json.loads(p).get("work_on") == "OFF" for _, p, _ in client.published)
-        assert off_seen
+        assert off_seen or stop_settings == {"isrunning": 0}
+        state, responder = drying_flow(client, clock)
+        original_publish = client.publish
+        def respond(topic, payload=None, qos=0, retain=False):
+            result = original_publish(topic, payload, qos, retain)
+            responder(topic, payload, {})
+            return result
+        client.publish = respond
         # Let the real operation finish after late matching telemetry; do not
         # cancel the task manually, which hid delayed-start bugs.
         client.fire_state(full_state(custom_temp=50, custom_timer=8, mode="filament drying"))

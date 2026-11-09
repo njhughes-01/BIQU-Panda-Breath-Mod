@@ -1943,7 +1943,8 @@ def test_native_snapshot_publishes_dry_time_as_minutes(tmp_path):
     assert mod.current_data["filament_timer"] == 360
 
 
-def test_mqtt_dry_press_json_uses_start_drying_never_a_frame_burst(tmp_path):
+@pytest.mark.parametrize("cancel_topic,cancel_value", [("manual", "PRESS"), ("auto", "PRESS"), ("mode_select", "Manual")])
+def test_mqtt_dry_press_json_uses_start_drying_never_a_frame_burst(tmp_path, cancel_topic, cancel_value):
     ft = _FakeNativeTransport()
     mod, client, _ = _mqtt_mod(tmp_path, [ft])
     mod.mqtt_client = client
@@ -1961,7 +1962,11 @@ def test_mqtt_dry_press_json_uses_start_drying_never_a_frame_burst(tmp_path):
     assert ft.starts and ft.starts[0][0] == 52 and ft.starts[0][1] == 8
     assert callable(ft.starts[0][2])
     assert ft.starts[0][2]() is False
-    mod._dry_generation += 1                      # a stop overtook the start
+    pending = []
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(pending)):
+        mod.on_mqtt_message(client, None, _fake_msg("dummy/panda/" + cancel_topic + "/set", cancel_value))
+    for coro in pending:
+        coro.close()
     assert ft.starts[0][2]() is True
     assert ft.sent == []                           # no legacy settings frames either
 
