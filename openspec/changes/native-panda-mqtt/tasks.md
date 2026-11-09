@@ -21,7 +21,7 @@
 4. Dedicated broker outage or stale device status must not queue/replay commands or claim heater-off.
 5. Native settings omit firmware/physical relay sensors: UI must say unconfirmed/unknown unless device evidence supports a claim.
 
-- [ ] 1. Native transport and protocol (`panda_native_mqtt.py`, `tests/test_panda_native_mqtt.py`)
+- [x] 1. Native transport and protocol (`panda_native_mqtt.py`, `tests/test_panda_native_mqtt.py`)
 
   - Write failing protocol/state tests. Exact mapping: settings.set_temp -> target_temp clamped0..60; filtertemp -> filter_temp; hotbedtemp -> heater_temp; filament_temp -> custom_temp; filament_timer -> custom_timer (hours); filament_drying_mode1/2/3 -> pla/petg/custom; work_mode1/2/3 -> auto mode/power on/filament drying; work_on bool/0/1 -> ON/OFF. work_mode0 -> work_onOFF (never unsupported mode). Reject unsupported fields/enums/non-finite values atomically, no partial publish. get_settings is an explicit no-op. Never pass WS envelopes to native topics.
   - Implement `NativePandaTransport(host, port, username, password, device_id, *, client_factory=None, clock=time.monotonic)` in new module. Async context manager with `send(payload: str) -> bool`, `recv() -> str`, `start_drying(temp: int, hours: int, cancelled: Callable[[], bool]) -> bool`, `emergency_stop() -> bool`. Constructor does not connect. Enter starts a separate clean-session paho client, connects asynchronously; exit disconnects/stops it. Tests inject fake client and clock, no device access.
