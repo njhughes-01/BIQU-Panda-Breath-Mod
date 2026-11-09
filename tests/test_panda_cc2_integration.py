@@ -6,12 +6,14 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, call
 
+import panda_native_mqtt
+
 from tests.conftest import current_state_dir
 
 REPO = os.path.join(os.path.dirname(__file__), "..")
 
 
-def load_panda(cc2_ip=""):
+def load_panda(cc2_ip="", env_extra=None):
     # Run the real Panda.py source, but with __file__ inside the per-test temp dir
     # so BASE_DIR / PREHEAT_STATE_FILE (and the import-time _load_preheat_state())
     # never touch the repo's runtime preheat_state.json. A copy of the tracked
@@ -27,6 +29,8 @@ def load_panda(cc2_ip=""):
         "HA_MQTT_BROKER": "dummy",
         "PANDA_DEBUG": "false",
     }
+    if env_extra:
+        env.update({k: ("" if v is None else str(v)) for k, v in env_extra.items()})
     with patch.dict(os.environ, env, clear=False):
         with patch("paho.mqtt.client.Client") as mock_cls:
             mock_instance = MagicMock()
@@ -44,10 +48,11 @@ def load_panda(cc2_ip=""):
                 return mod, mock_instance
 
 
-def _fake_msg(topic, payload):
+def _fake_msg(topic, payload, retain=False):
     msg = MagicMock()
     msg.topic = topic
     msg.payload = payload.encode() if isinstance(payload, str) else payload
+    msg.retain = retain
     return msg
 
 
@@ -1663,3 +1668,510 @@ def test_locked_connection_stops_without_cc2_printer_rebind(tmp_path,cc2_active)
     packets=asyncio.run(run())
     assert any(p.get('settings',{}).get('work_on') is False for p in packets)
     assert any('printer' in p for p in packets) is (not cc2_active)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Native MQTT device transport integration (openspec native-panda-mqtt, task 2)
+#
+# With PANDA_DEVICE_TRANSPORT=mqtt the mod commands and observes the Panda
+# over the dedicated broker's native protocol instead of the device WebSocket.
+# The tests drive the real update_limits_from_ws / on_mqtt_message / press and
+# stop handlers with a fake NativePandaTransport (Panda.py seam:
+# mod._native_transport_factory) and prove: no persistent device WebSocket is
+# ever opened in mqtt mode, reconnect never re-sends a policy command, dry
+# start goes through transport.start_drying (never the legacy 7-frame burst),
+# set topics forward only custom field updates, retained control inputs are
+# ignored, the required status topics are published, and an emergency stop is
+# native-first with at most ONE bounded WS fallback frame.
+# ═════════════════════════════════════════════════════════════════════════
+
+MQTT_ENV = {
+    "PANDA_MQTT_TOPIC_PREFIX": "dummy/panda",
+    "PANDA_DEVICE_TRANSPORT": "mqtt",
+    "PANDA_DEVICE_MQTT_HOST": "broker.local",
+    "PANDA_DEVICE_MQTT_PORT": "1884",
+    "PANDA_DEVICE_MQTT_USER": "panda_mod",
+    "PANDA_DEVICE_MQTT_ID": "panda_mod_test",
+}
+
+SNAPSHOT = {"settings": {
+    "warehouse_temper": 25, "set_temp": 50, "work_mode": 2, "work_on": 0,
+    "isrunning": 0, "filtertemp": 70, "work_time": 0, "poweroff_time": 0,
+    "filament_temp": 50, "filament_timer": 4, "custom_temp": 50,
+    "custom_timer": 4, "firmware_version": "1.2.0",
+}}
+
+
+class _FakeNativeTransport:
+    """Stands in for panda_native_mqtt.NativePandaTransport in Panda.py tests."""
+
+    def __init__(self, snapshots=None, raise_on_recv=None):
+        self.sent, self.starts = [], []          # send() payloads / start_drying calls
+        self.emergency_calls = 0
+        self.emergency_result = True
+        self.entered = self.exited = 0
+        self.recv_calls = 0
+        self.available = True
+        self.status_age = 0.0
+        self.start_status = None
+        self.heating_status = None
+        self._q = [json.dumps(s) for s in (snapshots if snapshots is not None else [SNAPSHOT])]
+        self._last = self._q[0] if self._q else json.dumps(SNAPSHOT)
+        self._raise = raise_on_recv
+
+    async def __aenter__(self):
+        self.entered += 1
+        return self
+
+    async def __aexit__(self, *exc):
+        self.exited += 1
+        return False
+
+    async def send(self, payload):
+        self.sent.append(json.loads(payload))
+        return True
+
+    async def recv(self):
+        self.recv_calls += 1
+        if self._q:
+            self._last = self._q.pop(0)
+            return self._last
+        if self._raise is not None:
+            raise self._raise
+        # Paced repeat (20 Hz): telemetry keeps flowing without flooding the
+        # recording mock publishers into unbounded memory in a tight loop.
+        await asyncio.sleep(0.05)
+        return self._last
+
+    async def start_drying(self, temperature_c, duration_hours, cancelled=None):
+        self.starts.append((temperature_c, duration_hours, cancelled))
+        return True
+
+    async def emergency_stop(self):
+        self.emergency_calls += 1
+        return self.emergency_result
+
+
+class _OneShotWs:
+    """Bounded WS fallback fake: records frames, scripted recv, blocks after."""
+
+    def __init__(self, recv_msgs=None, send_error=None):
+        self.log = []
+        self._q = [json.dumps(m) for m in (recv_msgs or [])]
+        self._send_error = send_error
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def send(self, payload):
+        if self._send_error:
+            raise self._send_error
+        self.log.append(json.loads(payload))
+
+    async def recv(self):
+        if self._q:
+            return self._q.pop(0)
+        await asyncio.Event().wait()
+
+
+def _mqtt_mod(tmp_path, transports, **load_kw):
+    """Module in mqtt mode with a scripted list of fake transports.
+
+    The password file only has to exist — the fake factory never reads it, and
+    the real factory path is exercised by the fail-closed test instead.
+    """
+    (tmp_path / "pwpw").write_text("s3cret\n")
+    env = dict(MQTT_ENV, PANDA_DEVICE_MQTT_PASSWORD_FILE=str(tmp_path / "pwpw"))
+    mod, client = load_panda(cc2_ip="192.168.1.50", env_extra=env, **load_kw)
+    mod.mqtt_client = client
+    created = []
+
+    def _factory(**kw):
+        ft = transports[min(len(created), len(transports) - 1)]
+        created.append((ft, kw))
+        return ft
+
+    mod._native_transport_factory = _factory
+    return mod, client, created
+
+
+def _run_loop_briefly(mod, until, timeout=5.0):
+    """Run update_limits_from_ws until `until()` holds (polling) or timeout."""
+    async def run():
+        task = asyncio.create_task(mod.update_limits_from_ws())
+        try:
+            deadline = time.monotonic() + timeout
+            while not until() and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            assert until(), "loop never reached the requested state"
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(run())
+
+
+def _no_ws_connect():
+    def _boom(*a, **k):
+        raise AssertionError("mqtt mode must never open the device WebSocket")
+    return _boom
+
+
+def _ws_boom(hits):
+    def _boom(*a, **k):
+        hits.append(1)
+        raise AssertionError("mqtt mode must never open the device WebSocket")
+    return _boom
+
+
+def _pubs(client):
+    out = {}
+    for c in client.publish.call_args_list:
+        out.setdefault(c.args[0], []).append(c.args[1])
+    return out
+
+
+def test_mqtt_transport_mode_never_opens_the_device_websocket(tmp_path):
+    ft = _FakeNativeTransport()
+    mod, client, created = _mqtt_mod(tmp_path, [ft])
+    with patch.object(mod.websockets, "connect", _no_ws_connect()), \
+         patch.object(mod, "log_event"):
+        _run_loop_briefly(mod, lambda: ft.recv_calls >= 1)
+    assert created and created[0][0] is ft
+    assert created[0][1]["host"] == "broker.local" and created[0][1]["port"] == 1884
+    assert created[0][1]["password"] == "s3cret"           # read from the file
+    assert mod.panda_ws is ft                              # commands route to it
+    assert ft.entered == 1 and ft.sent == []               # no bind/get_settings burst
+
+
+def test_websocket_mode_default_never_touches_the_native_factory(tmp_path):
+    mod, client = load_panda(cc2_ip="192.168.1.50")   # no transport env at all
+    assert mod.DEVICE_TRANSPORT == "websocket"
+    calls = []
+    mod._native_transport_factory = lambda **k: calls.append(k)
+    ws = _LoopWs(lambda d: False, [{"printer": "get_settings"}, SNAPSHOT])
+    with patch.object(mod.websockets, "connect", lambda *a, **k: _ConnectOnce(ws)), \
+         patch.object(mod, "log_event"):
+        _run_loop_briefly(mod, lambda: ws.drained.is_set(), timeout=8.0)
+    assert calls == []
+    assert mod.panda_ws is not None
+
+
+def test_mqtt_config_without_cc2_active_is_rejected_clearly(tmp_path):
+    (tmp_path / "pwpw").write_text("s3cret\n")
+    mod, client = load_panda(cc2_ip="", env_extra=dict(
+        MQTT_ENV, PANDA_DEVICE_MQTT_PASSWORD_FILE=str(tmp_path / "pwpw")))
+    # Legacy (non-CC2) deployments stay on the WebSocket, always, in v1.
+    assert mod.DEVICE_TRANSPORT == "websocket"
+    assert "requires CC2" in mod.DEVICE_TRANSPORT_REJECT_REASON
+
+
+def test_mqtt_missing_device_config_fails_closed(tmp_path):
+    # No password file, no device id: the mod must NOT fall back to a silent
+    # WebSocket; it stays connected to nothing and reports the device OFF.
+    mod, client = load_panda(cc2_ip="192.168.1.50", env_extra={
+        "PANDA_MQTT_TOPIC_PREFIX": "dummy/panda",
+        "PANDA_DEVICE_TRANSPORT": "mqtt",
+        "PANDA_DEVICE_MQTT_HOST": "broker.local",
+    })
+    assert mod.DEVICE_TRANSPORT == "mqtt"
+    assert mod.DEVICE_MQTT_CONFIG_OK is False
+    hits = []
+    with patch.object(mod.websockets, "connect", _ws_boom(hits)), \
+         patch.object(mod, "log_event"):
+        _run_loop_briefly(mod, lambda: "dummy/panda/device_available" in _pubs(client))
+        assert mod.panda_ws is None
+    assert hits == []
+
+
+def test_mqtt_first_snapshot_sends_no_policy_commands(tmp_path):
+    # An ASA print with a pending heater-off and a warm target: the legacy
+    # loop replays OFF and resumes heating on (re)bind. Native must send
+    # NOTHING — a fresh snapshot alone carries the device truth.
+    ft = _FakeNativeTransport()
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    mod._panda_off_pending = True
+    mod._panda_off_pending_at = time.time()
+    _arm_asa_printing(mod, tmp_path)
+    def _replay():
+        raise AssertionError("native reconnect must not replay _resend_pending_off")
+    mod._resend_pending_off = _replay
+    with patch.object(mod.websockets, "connect", _no_ws_connect()), \
+         patch.object(mod, "log_event"):
+        _run_loop_briefly(mod, lambda: ft.recv_calls >= 2)
+    assert ft.sent == [] and ft.starts == []
+
+
+def test_mqtt_reconnect_invalidates_without_replaying_anything(tmp_path):
+    # Transport dies mid-stream: the loop must reconnect (fresh factory call,
+    # new transport), must not replay pending-off or any heat command, and the
+    # except path must not zero native active-cycle data.
+    ft1 = _FakeNativeTransport(raise_on_recv=panda_native_mqtt.DeviceUnavailable("gone"))
+    ft2 = _FakeNativeTransport()
+    mod, client, created = _mqtt_mod(tmp_path, [ft1, ft2])
+    mod._panda_off_pending = True
+    mod._panda_off_pending_at = time.time()
+    _arm_asa_printing(mod, tmp_path)
+    def _replay():
+        raise AssertionError("native reconnect must not replay _resend_pending_off")
+    mod._resend_pending_off = _replay
+    with patch.object(mod.websockets, "connect", _no_ws_connect()), \
+         patch.object(mod, "log_event"):
+        _run_loop_briefly(mod, lambda: len(created) >= 2 and ft2.recv_calls >= 1, timeout=15.0)
+    assert ft1.exited == 1 and ft2.entered >= 1
+    assert ft1.sent == [] and ft2.sent == [] and ft2.starts == []
+
+
+def test_native_snapshot_publishes_dry_time_as_minutes(tmp_path):
+    # custom_timer is HOURS on the native protocol; the mod's existing dry_time
+    # number keeps its minutes display.
+    ft = _FakeNativeTransport([{"settings": dict(SNAPSHOT["settings"],
+                                                 work_mode=3, custom_timer=6)}])
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    with patch.object(mod.websockets, "connect", _no_ws_connect()), \
+         patch.object(mod, "log_event"):
+        _run_loop_briefly(mod, lambda: ft.recv_calls >= 1)
+    pubs = _pubs(client)
+    assert pubs["dummy/panda/dry_time"][-1] == 360
+    assert mod.current_data["filament_timer"] == 360
+
+
+def test_mqtt_dry_press_json_uses_start_drying_never_a_frame_burst(tmp_path):
+    ft = _FakeNativeTransport()
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    mod.mqtt_client = client
+    mod.panda_ws = ft
+    mod.main_loop = MagicMock()
+    mod._cc2_press_button = MagicMock()
+    captured = []
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(captured)):
+        mod.on_mqtt_message(client, None, _fake_msg(
+            "dummy/panda/drying/set",
+            json.dumps({"enabled": True, "duration_hours": 8, "temperature_c": 52})))
+    for coro in captured:
+        with patch.object(mod, "log_event"):
+            asyncio.run(coro)
+    assert ft.starts and ft.starts[0][0] == 52 and ft.starts[0][1] == 8
+    assert callable(ft.starts[0][2])
+    assert ft.starts[0][2]() is False
+    mod._dry_generation += 1                      # a stop overtook the start
+    assert ft.starts[0][2]() is True
+    assert ft.sent == []                           # no legacy settings frames either
+
+
+def test_mqtt_press_without_json_uses_current_settings_minutes_as_hours(tmp_path):
+    ft = _FakeNativeTransport()
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    mod.panda_ws = ft
+    mod.main_loop = MagicMock()
+    mod.current_data.update(filament_temp=55, filament_timer=180)   # minutes
+    captured = []
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(captured)):
+        mod.on_mqtt_message(client, None, _fake_msg("dummy/panda/drying/set", ""))
+    for coro in captured:
+        with patch.object(mod, "log_event"):
+            asyncio.run(coro)
+    assert ft.starts and ft.starts[0] == (55, 3, ft.starts[0][2])
+    # A duration that cannot be represented in whole hours is refused outright.
+    ft.starts.clear()
+    mod.current_data["filament_timer"] = 90
+    captured.clear()
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(captured)):
+        mod.on_mqtt_message(client, None, _fake_msg("dummy/panda/drying/set", ""))
+    for coro in captured:
+        with patch.object(mod, "log_event"):
+            asyncio.run(coro)
+    assert ft.starts == []
+
+
+def test_mqtt_explicit_json_duration_hours_is_canonical(tmp_path):
+    ft = _FakeNativeTransport()
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    mod.panda_ws = ft
+    mod.main_loop = MagicMock()
+    mod.current_data.update(filament_temp=55, filament_timer=120)
+    captured = []
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(captured)):
+        mod.on_mqtt_message(client, None, _fake_msg(
+            "dummy/panda/drying/set",
+            json.dumps({"enabled": True, "duration_hours": 8, "temperature_c": 50})))
+    for coro in captured:
+        with patch.object(mod, "log_event"):
+            asyncio.run(coro)
+    assert ft.starts[0][:2] == (50, 8)             # JSON wins over current settings
+    assert ft.sent == []
+
+
+def test_mqtt_dry_number_sets_forward_only_custom_field_updates(tmp_path):
+    ft = _FakeNativeTransport()
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    mod.panda_ws = ft
+    mod.main_loop = MagicMock()
+    captured = []
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(captured)):
+        mod.on_mqtt_message(client, None, _fake_msg("dummy/panda/dry_temp/set", "48"))
+        mod.on_mqtt_message(client, None, _fake_msg("dummy/panda/dry_time/set", "180"))
+        mod.on_mqtt_message(client, None, _fake_msg("dummy/panda/dry_time/set", "90"))
+    for coro in captured:
+        with patch.object(mod, "log_event"):
+            asyncio.run(coro)
+    # Minutes must land as whole hours; 90 min is not representable → not sent.
+    assert {"settings": {"filament_temp": 48}} in ft.sent
+    assert {"settings": {"filament_timer": 3}} in ft.sent
+    assert len(ft.sent) == 2
+    assert all("work_on" not in s.get("settings", {}) and
+               "isrunning" not in s.get("settings", {}) for s in ft.sent)
+
+
+def test_mqtt_retained_control_inputs_are_ignored(tmp_path):
+    ft = _FakeNativeTransport()
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    mod.panda_ws = ft
+    mod.main_loop = MagicMock()
+    captured = []
+    msg = _fake_msg("dummy/panda/drying/set",
+                    json.dumps({"enabled": True, "duration_hours": 8, "temperature_c": 52}))
+    msg.retain = True
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(captured)):
+        mod.on_mqtt_message(client, None, msg)
+    assert captured == []                          # no flow scheduled at all
+    assert ft.starts == [] and ft.sent == []
+
+
+def test_mqtt_status_topics_are_published(tmp_path):
+    ft = _FakeNativeTransport()
+    ft.available = True
+    ft.status_age = 1.5
+    ft.start_status = "uncertain"
+    ft.heating_status = "pending"
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    with patch.object(mod.websockets, "connect", _no_ws_connect()), \
+         patch.object(mod, "log_event"):
+        _run_loop_briefly(mod, lambda: ft.recv_calls >= 1)
+    pubs = _pubs(client)
+    assert pubs["dummy/panda/device_transport"][-1] == "mqtt"
+    assert pubs["dummy/panda/device_available"][-1] == "ON"
+    assert pubs["dummy/panda/device_status_age"][-1] == "1.5"
+    assert pubs["dummy/panda/dry_start_status"][-1] == "uncertain"
+    assert pubs["dummy/panda/dry_heating_confirmed"][-1] == "pending"
+
+
+def _run_mqtt_heat_stop(mod, client, ft, topic="dummy/panda/heat_stop/set"):
+    mod.panda_ws = ft
+    mod.main_loop = MagicMock()
+    captured = []
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(captured)):
+        mod.on_mqtt_message(client, None, _fake_msg(topic, "ON"))
+    with patch.object(mod, "log_event") as log:
+        for coro in captured:
+            asyncio.run(coro)
+    return log
+
+
+def test_mqtt_emergency_stop_is_native_first_with_no_websocket(tmp_path):
+    ft = _FakeNativeTransport()
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    with patch.object(mod.websockets, "connect", _no_ws_connect()):
+        _run_mqtt_heat_stop(mod, client, ft)
+    assert ft.emergency_calls == 1
+    assert ft.sent == []
+
+
+def test_mqtt_emergency_falls_back_to_one_bounded_ws_frame(tmp_path):
+    # Native unconfirmed → exactly one WS connection sending ONLY the emergency
+    # off frame, and confirming OFF from a device echo when it can.
+    ft = _FakeNativeTransport()
+    ft.emergency_result = False
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    ws = _OneShotWs(recv_msgs=[{"settings": {"work_on": False}}])
+    with patch.object(mod.websockets, "connect", lambda *a, **k: _ConnectOnce(ws)), \
+         patch("asyncio.sleep", _instant_sleep):
+        log = _run_mqtt_heat_stop(mod, client, ft)
+    assert ft.emergency_calls == 1
+    assert ws.log == [{"settings": {"isrunning": 0, "work_on": False, "set_temp": 0}}]
+    msgs = " ".join(str(c.args[0]) for c in log.call_args_list if c.args)
+    assert "OFF confirmed via WebSocket echo" in msgs
+    assert "UNCONFIRMED" not in msgs
+
+
+def test_mqtt_emergency_reports_unconfirmed_when_both_transports_fail(tmp_path):
+    # The mod must never claim the heater is off in that state.
+    ft = _FakeNativeTransport()
+    ft.emergency_result = False
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    ws = _OneShotWs()
+    with patch.object(mod.websockets, "connect", lambda *a, **k: _ConnectOnce(ws)), \
+         patch("asyncio.sleep", _instant_sleep):
+        log = _run_mqtt_heat_stop(mod, client, ft, topic="dummy/panda/heat_stop/set")
+    msgs = " ".join(str(c.args[0]) for c in log.call_args_list if c.args)
+    assert "UNCONFIRMED" in msgs
+    pubs = _pubs(client)
+    assert any("UNCONFIRMED" in str(p) for p in pubs.get("dummy/panda/status", []))
+    assert ws.log == [{"settings": {"isrunning": 0, "work_on": False, "set_temp": 0}}]
+
+
+def test_mqtt_emergency_off_falls_back_when_transport_is_down(tmp_path):
+    # Locked/transport-down at stop time: panda_ws None must not skip the stop;
+    # the bounded fallback frame is still the only thing that touches a socket.
+    ft = _FakeNativeTransport()
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    mod.panda_ws = None
+    mod.main_loop = MagicMock()
+    ws = _OneShotWs(recv_msgs=[{"settings": {"work_on": False}}])
+    captured = []
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(captured)), \
+         patch.object(mod.websockets, "connect", lambda *a, **k: _ConnectOnce(ws)), \
+         patch("asyncio.sleep", _instant_sleep), \
+         patch.object(mod, "log_event"):
+        mod.on_mqtt_message(client, None, _fake_msg("dummy/panda/heat_stop/set", "ON"))
+        for coro in captured:
+            asyncio.run(coro)
+    assert ws.log == [{"settings": {"isrunning": 0, "work_on": False, "set_temp": 0}}]
+    assert ft.emergency_calls == 0
+
+
+def test_mqtt_global_lock_never_enters_the_legacy_ws_off_loop(tmp_path):
+    # While locked with no transport up, the loop must not spin WS-off writes.
+    ft = _FakeNativeTransport()
+    mod, client, created = _mqtt_mod(tmp_path, [ft])
+    mod.global_lock = True
+    hits = []
+    with patch.object(mod.websockets, "connect", _ws_boom(hits)), \
+         patch.object(mod, "log_event"):
+        async def run():
+            task = asyncio.create_task(mod.update_limits_from_ws())
+            await asyncio.sleep(0.2)          # a real yield so the loop spins
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        asyncio.run(run())
+    assert hits == []
+    assert created == []
+    assert mod.panda_ws is None
+
+
+def test_mqtt_global_lock_still_consumes_device_telemetry(tmp_path):
+    # OFF confirmation needs ingestion even while locked: with a live
+    # transport the recv loop keeps being drained, and no settings frame is
+    # ever written from the loop.
+    ft = _FakeNativeTransport()
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    with patch.object(mod.websockets, "connect", _no_ws_connect()), \
+         patch.object(mod, "log_event"):
+        async def run():
+            task = asyncio.create_task(mod.update_limits_from_ws())
+            try:
+                deadline = time.monotonic() + 10
+                while ft.recv_calls < 1 and time.monotonic() < deadline:
+                    await asyncio.sleep(0.01)
+                assert ft.recv_calls >= 1, "transport never streamed"
+                mod.global_lock = True          # lock while connected
+                while ft.recv_calls < 3 and time.monotonic() < deadline + 10:
+                    await asyncio.sleep(0.01)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        asyncio.run(run())
+    assert ft.recv_calls >= 3
+    assert ft.sent == []

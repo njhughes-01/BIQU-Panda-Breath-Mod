@@ -32,7 +32,7 @@
   - Heating proof tests: monitor native temperatures after confirmed start; log separate confirmation after2C rise from pre-start within300s, otherwise report no heating confirmation. Already-at-target does not claim temperature-rise. Do not change heat/timer on timeout or stale state. Make status available as transport attributes/callback so backend can publish confirmation status without modifying UI.
   - Run red then green targeted tests with Docker Compose command override. Save complete outputs. Commit only task files and checkbox updates.
 
-- [ ] 2. Backend seam (`Panda.py`, `tests/test_panda_cc2_integration.py`)
+- [x] 2. Backend seam (`Panda.py`, `tests/test_panda_cc2_integration.py`)
 
   - Write integration tests first for transport selection/no WS connect in mqtt; separate device broker config; original WS defaults unchanged; legacy mode with mqtt rejected clearly; missing ID/config fails closed.
   - Add lazy native transport factory and config above. Keep `panda_ws` as the existing async send/recv facade so existing direct sends also route through the selected transport. Replace normal WS context selection with native async context only in mqtt mode; skip ALL printer bind/get_settings initialization in mqtt. `main()` starts existing loop with transport-aware factory, never simultaneous persistent native+WS. No raw Panda emulation server in mqtt/CC2.

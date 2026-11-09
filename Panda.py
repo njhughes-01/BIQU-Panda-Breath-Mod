@@ -3,7 +3,9 @@ import asyncio, ssl, json, time, requests, websockets, os, socket, threading, en
 import logging
 import paho.mqtt.client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
+from contextlib import asynccontextmanager
 
+import panda_native_mqtt as pnm
 from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 # ============================================================
@@ -164,6 +166,40 @@ CC2_HA_FALLBACK_TEMP = float(CONFIG.get("CC2_HA_FALLBACK_TEMP", os.environ.get("
 HA_BASE_URL = CONFIG.get("HA_BASE_URL", os.environ.get("HA_BASE_URL", ""))
 _ha_cc2_entities: dict = {}
 MQTT_PORT = CONFIG.get("MQTT_PORT", int(os.environ.get("HA_MQTT_PORT", 1883)))
+
+# ============================================================
+# GERÄTE-TRANSPORT (native-panda-mqtt change)
+# ------------------------------------------------------------
+# PANDA_DEVICE_TRANSPORT=websocket (default)   → Gerät-WB wie bisher.
+# PANDA_DEVICE_TRANSPORT=mqtt                  → dedizierter, authentifizierter
+#   Broker über panda_native_mqtt.NativePandaTransport; nur im CC2-Modus, und
+#   es gibt NIE einen stillen Rückfall auf das WebSocket. Fehlt Konfiguration,
+#   bleibt das Gerät unverbindet (fail closed) und wird als OFF gemeldet.
+# ============================================================
+DEVICE_TRANSPORT = (CONFIG.get("PANDA_DEVICE_TRANSPORT") or os.environ.get("PANDA_DEVICE_TRANSPORT", "websocket")).strip().lower()
+DEVICE_TRANSPORT_REJECT_REASON = ""
+DEVICE_MQTT_HOST = CONFIG.get("PANDA_DEVICE_MQTT_HOST", os.environ.get("PANDA_DEVICE_MQTT_HOST", ""))
+DEVICE_MQTT_PORT = int(CONFIG.get("PANDA_DEVICE_MQTT_PORT") or os.environ.get("PANDA_DEVICE_MQTT_PORT", 1883))
+DEVICE_MQTT_USER = CONFIG.get("PANDA_DEVICE_MQTT_USER", os.environ.get("PANDA_DEVICE_MQTT_USER", ""))
+DEVICE_MQTT_PASSWORD_FILE = CONFIG.get("PANDA_DEVICE_MQTT_PASSWORD_FILE", os.environ.get("PANDA_DEVICE_MQTT_PASSWORD_FILE", ""))
+DEVICE_MQTT_ID = CONFIG.get("PANDA_DEVICE_MQTT_ID", os.environ.get("PANDA_DEVICE_MQTT_ID", ""))
+DEVICE_MQTT_CONFIG_OK = True
+if DEVICE_TRANSPORT == "mqtt":
+    if not CC2_ACTIVE:
+        DEVICE_TRANSPORT_REJECT_REASON = ("PANDA_DEVICE_TRANSPORT=mqtt requires CC2_ACTIVE mode; "
+                                          "legacy deployments keep the WebSocket (v1)")
+        DEVICE_TRANSPORT = "websocket"
+    else:
+        _missing = [n for n, v in (("PANDA_DEVICE_MQTT_HOST", DEVICE_MQTT_HOST),
+                                   ("PANDA_DEVICE_MQTT_PASSWORD_FILE", DEVICE_MQTT_PASSWORD_FILE),
+                                   ("PANDA_DEVICE_MQTT_ID", DEVICE_MQTT_ID)) if not v]
+        if _missing:
+            DEVICE_MQTT_CONFIG_OK = False
+            DEVICE_TRANSPORT_REJECT_REASON = "incomplete mqtt device config: " + ", ".join(_missing)
+elif DEVICE_TRANSPORT != "websocket":
+    DEVICE_TRANSPORT_REJECT_REASON = f"unknown PANDA_DEVICE_TRANSPORT={DEVICE_TRANSPORT!r}; using websocket"
+    DEVICE_TRANSPORT = "websocket"
+_native_transport_factory = None   # test seam; None → real panda_native_mqtt.NativePandaTransport
 
 # Filament type → chamber target (°C). Override via CC2_FILAMENT_MAP env var (JSON).
 _DEFAULT_FILAMENT_MAP = {
@@ -887,6 +923,11 @@ def _cc2_press_button(action: str) -> None:
 
 def on_mqtt_message(client, userdata, msg):
     global _dry_generation
+    if DEVICE_TRANSPORT == "mqtt" and msg.retain and str(msg.topic).startswith(MQTT_TOPIC_PREFIX):
+        # Retained HA state is replayed on subscribe — it is not an order and
+        # must never start a native device operation.
+        log_event(f"[NATIVE] Retained control input ignored: {msg.topic}")
+        return
     if msg.topic.rsplit('/', 2)[-2:] in (["heat_stop", "set"], ["work_on", "set"], ["panda_power", "set"], ["drying", "set"], ["manual", "set"], ["auto", "set"]):
         _dry_generation += 1
     # ✅ FIX: Alle globalen Deklarationen MÜSSEN am Anfang der Funktion stehen
@@ -1037,6 +1078,11 @@ def on_mqtt_message(client, userdata, msg):
 
         async def stop_flow():
             async with _get_panda_cmd_lock():
+                if DEVICE_TRANSPORT == "mqtt":
+                    # Native mode: MQTT OFF with readback confirmation, at most
+                    # ONE bounded WS fallback frame (see _native_emergency_stop).
+                    await _native_emergency_stop()
+                    return
                 if panda_ws:
                     try:
                         await panda_ws.send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "work_mode": 0, "set_temp": 0}}))
@@ -1155,6 +1201,48 @@ def on_mqtt_message(client, userdata, msg):
 
         dry_generation = _dry_generation
         async def flow():
+            if DEVICE_TRANSPORT == "mqtt":
+                # Native mode: the transport's start operation — individual
+                # writes, per-field readback, no frame burst, no retry. A stop
+                # that bumps the generation overtakes the start via cancelled().
+                tr = panda_ws
+                if tr is None or not getattr(tr, "available", False):
+                    log_event("[DRY-REJECTED] Native device transport not connected/fresh", force_console=True)
+                    return
+                if full_dry is not None:
+                    _t_c, _h_r = temp, hours          # explicit JSON: whole hours are canonical
+                else:
+                    # Legacy PRESS: the mod's validated current drying settings;
+                    # dry_time is minutes → must convert to whole hours.
+                    try:
+                        _t_c = int(current_data.get("filament_temp"))
+                        _mins = int(current_data.get("filament_timer"))
+                    except (TypeError, ValueError):
+                        log_event("[DRY-REJECTED] No valid current drying settings for legacy PRESS", force_console=True)
+                        return
+                    if not 40 <= _t_c <= 60:
+                        log_event(f"[DRY-REJECTED] Current drying temperature {_t_c}C outside 40-60C", force_console=True)
+                        return
+                    if _mins <= 0 or _mins % 60 or not (1 <= _mins // 60 <= 99):
+                        log_event(f"[DRY-REJECTED] Current drying time {_mins} min not representable as whole hours (1-99)", force_console=True)
+                        return
+                    _h_r = _mins // 60
+
+                def _native_cancelled():
+                    return dry_generation != _dry_generation or global_lock or power_forced_off or heating_locked
+
+                try:
+                    _ok = await tr.start_drying(_t_c, _h_r, cancelled=_native_cancelled)
+                except Exception as exc:
+                    _ok = False
+                    log_event(f"[DRY-UNCERTAIN] Native start raised {type(exc).__name__}: {exc}; not retrying", force_console=True)
+                if _ok:
+                    log_event(f"[DRY-STARTED] Native custom dry {_t_c}C for {_h_r}h confirmed by device readback", force_console=True)
+                elif getattr(tr, "start_status", None) == "uncertain":
+                    log_event(f"[DRY-UNCERTAIN] Native custom dry {_t_c}C/{_h_r}h delivery unknown; NOT retrying; see {MQTT_TOPIC_PREFIX}/dry_start_status", force_console=True)
+                else:
+                    log_event(f"[DRY-FAILED] Native custom dry {_t_c}C/{_h_r}h rejected before writing; see {MQTT_TOPIC_PREFIX}/dry_start_status", force_console=True)
+                return
             if full_dry is not None:
                 # V1.0.3's own UI writes custom settings in hours, selects custom,
                 # then starts. Do not combine fields or retry ambiguous delivery.
@@ -1290,10 +1378,26 @@ def on_mqtt_message(client, userdata, msg):
         if msg.topic.endswith("/dry_temp/set"):
             current_data["filament_temp"] = int(val)
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/dry_temp", int(val), retain=True)
+            if DEVICE_TRANSPORT == "mqtt" and panda_ws is not None:
+                # Custom-field update only — changing a number must never start
+                # or reset the drying timer; the transport gate enforces freshness.
+                asyncio.run_coroutine_threadsafe(
+                    panda_send(json.dumps({"settings": {"filament_temp": int(val)}})),
+                    main_loop
+                )
             return
         if msg.topic.endswith("/dry_time/set"):
             current_data["filament_timer"] = int(val)
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/dry_time", int(val), retain=True)
+            if DEVICE_TRANSPORT == "mqtt" and panda_ws is not None:
+                # The mod keeps minutes; native custom_timer is whole hours.
+                if int(val) % 60 == 0 and 1 <= int(val) // 60 <= 99:
+                    asyncio.run_coroutine_threadsafe(
+                        panda_send(json.dumps({"settings": {"filament_timer": int(val) // 60}})),
+                        main_loop
+                    )
+                else:
+                    log_event(f"[DRY-SET] {int(val)} min not representable as whole native hours (1-99) — not forwarded", force_console=True)
             return
         if msg.topic.endswith("/soll/set"):
             key, data_key = "set_temp", "chamber_setpoint"
@@ -1309,10 +1413,10 @@ def on_mqtt_message(client, userdata, msg):
         current_data[data_key] = val
         mqtt_client.publish(msg.topic.replace("/set", ""), int(val), retain=True)
         if panda_ws:
-            asyncio.run_coroutine_threadsafe(
-                panda_ws.send(json.dumps({"settings": {key: int(val)}})),
-                main_loop
-            )
+            _num_coro = (panda_send(json.dumps({"settings": {key: int(val)}}))
+                         if DEVICE_TRANSPORT == "mqtt"
+                         else panda_ws.send(json.dumps({"settings": {key: int(val)}})))
+            asyncio.run_coroutine_threadsafe(_num_coro, main_loop)
     except Exception as e:
         log_event(f"[TEMP-SET-ERR] {e}", force_console=True)
 
@@ -1489,6 +1593,15 @@ elif CC2_HA_MODE:
     log_event("[CONFIG] CC2-HA mode — reading CC2 data from elegoo-homeassistant entities", force_console=True)
 else:
     log_event(f"[CONFIG] Traditional mode — PRINTER_IP={PRINTER_IP}", force_console=True)
+if DEVICE_TRANSPORT == "mqtt":
+    if DEVICE_MQTT_CONFIG_OK:
+        log_event(f"[CONFIG] Device transport = dedicated MQTT broker {DEVICE_MQTT_HOST}:{DEVICE_MQTT_PORT} "
+                  f"(device id {DEVICE_MQTT_ID}); device WebSocket disabled", force_console=True)
+    else:
+        log_event(f"[CONFIG] FAIL CLOSED — {DEVICE_TRANSPORT_REJECT_REASON}; no device connection will be opened",
+                  force_console=True)
+elif DEVICE_TRANSPORT_REJECT_REASON:
+    log_event(f"[CONFIG] Device transport mqtt rejected — {DEVICE_TRANSPORT_REJECT_REASON}", force_console=True)
     
 
 
@@ -1499,6 +1612,18 @@ async def panda_send(payload: str):
     Returns False when there was no live link and the command was DROPPED (logged);
     otherwise True once the transport accepted it. Existing callers ignore the value.
     "Accepted" is not a device acknowledgement — the Panda protocol has none."""
+    if DEVICE_TRANSPORT == "mqtt":
+        # Native mode: the dedicated-broker transport is the ONLY device path.
+        # No TCP emulation, no WebSocket, no offline queue — while it is down
+        # the command is dropped and logged (fail closed).
+        if panda_ws is not None and hasattr(panda_ws, "send"):
+            try:
+                return await panda_ws.send(payload)
+            except pnm.DeviceUnavailable as e:
+                log_event(f"[NATIVE-DROPPED] {e} — command dropped: {payload[:120]}", force_console=True)
+                return False
+        log_event(f"[NATIVE-DROPPED] No live native transport — command dropped: {payload[:120]}", force_console=True)
+        return False
     if panda_ws:
         await panda_ws.send(payload)
     elif panda_writer and not panda_writer.is_closing():
@@ -1636,6 +1761,136 @@ async def _cc2_send_heat_sequence(generation, preheat_temp) -> "SendResult":
     return worst
 
 
+# --- native device transport (openspec native-panda-mqtt) -------------------
+
+def _build_native_transport():
+    """Create the NativePandaTransport for the dedicated broker, else None.
+
+    The broker password is read from its file at EVERY connect so a Docker
+    secret rotation is picked up on reconnect. Any problem fails closed here:
+    this function never falls back to the WebSocket."""
+    if DEVICE_TRANSPORT != "mqtt" or not DEVICE_MQTT_CONFIG_OK:
+        return None
+    try:
+        password = Path(DEVICE_MQTT_PASSWORD_FILE).read_text(encoding="utf-8").strip()
+    except OSError as e:
+        log_event(f"[NATIVE] Broker password file unreadable ({e.__class__.__name__}) — failing closed", force_console=True)
+        return None
+    if not password:
+        log_event("[NATIVE] Broker password file empty — failing closed", force_console=True)
+        return None
+    factory = _native_transport_factory or pnm.NativePandaTransport
+    try:
+        return factory(host=DEVICE_MQTT_HOST, port=DEVICE_MQTT_PORT,
+                       username=DEVICE_MQTT_USER, password=password,
+                       device_id=DEVICE_MQTT_ID, logger=log_event)
+    except pnm.NativeConfigError as e:
+        log_event(f"[NATIVE] Transport config rejected: {e} — failing closed", force_console=True)
+        return None
+
+
+# The ONLY frame the bounded emergency WebSocket fallback may ever write:
+# isrunning/work_on/set_temp off — no work_mode, no bind, no get_settings,
+# nothing that could select or start anything.
+_NATIVE_EMERGENCY_FRAME = json.dumps({"settings": {"isrunning": 0, "work_on": False, "set_temp": 0}})
+
+
+async def _native_ws_off_fallback():
+    """ONE bounded device-WebSocket connect sending only the emergency off frame.
+
+    Used solely when the native emergency stop did not confirm. Observes an OFF
+    echo if the device reports one quickly, then closes. Returns True (OFF
+    confirmed), False (connect/send failed) or None (sent but no readback →
+    heater state UNKNOWN)."""
+    try:
+        async with websockets.connect(f"ws://{PANDA_IP}/ws", ping_interval=None,
+                                      ping_timeout=None, close_timeout=1, open_timeout=3) as ws:
+            await ws.send(_NATIVE_EMERGENCY_FRAME)
+            log_event("[EMERGENCY] Native unconfirmed — single bounded WebSocket off frame sent", force_console=True)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 5.0
+            while loop.time() < deadline:
+                try:
+                    msg = await asyncio.wait_for(ws.recv(), timeout=max(0.05, deadline - loop.time()))
+                except Exception:
+                    break
+                try:
+                    s = json.loads(msg).get("settings", {})
+                except Exception:
+                    continue
+                if s.get("work_on") in (False, 0):
+                    return True
+            return None
+    except Exception as e:
+        log_event(f"[EMERGENCY] Bounded WebSocket fallback failed: {type(e).__name__}: {e}", force_console=True)
+        return False
+
+
+async def _native_emergency_stop() -> bool:
+    """Native emergency stop: MQTT OFF + readback, then at most ONE bounded WS
+    fallback. Honest reporting only — the heater is never claimed OFF without a
+    device-side confirmation somewhere in the chain."""
+    tr = panda_ws
+    if tr is not None and hasattr(tr, "emergency_stop"):
+        try:
+            if await tr.emergency_stop():
+                log_event("[EMERGENCY] Heater OFF confirmed by native device readback", force_console=True)
+                return True
+        except Exception as e:
+            log_event(f"[EMERGENCY] Native stop raised {type(e).__name__}: {e}", force_console=True)
+    else:
+        log_event("[EMERGENCY] Native transport not connected — going straight to the bounded WebSocket fallback", force_console=True)
+    res = await _native_ws_off_fallback()
+    if res is True:
+        log_event("[EMERGENCY] Heater OFF confirmed via WebSocket echo (native unconfirmed)", force_console=True)
+        return True
+    if res is None:
+        log_event("[EMERGENCY] STOP UNCONFIRMED — off frame sent, no device OFF readback. "
+                  "Heater state UNKNOWN — check the chamber heater manually.", force_console=True)
+    else:
+        log_event("[EMERGENCY] STOP UNCONFIRMED — both transports failed. "
+                  "Heater state UNKNOWN — check the chamber heater manually.", force_console=True)
+    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/status",
+                        "Emergency stop UNCONFIRMED — heater state UNKNOWN", retain=True)
+    return False
+
+
+def _publish_native_device_status(tr):
+    """HA-visible truth about the native link and the last dry-start attempt."""
+    if tr is None:
+        return
+    age = getattr(tr, "status_age", None)
+    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/device_transport", "mqtt", retain=True)
+    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/device_available",
+                        "ON" if getattr(tr, "available", False) else "OFF", retain=True)
+    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/device_status_age",
+                        "unknown" if age is None else f"{age:.1f}", retain=True)
+    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/dry_start_status",
+                        getattr(tr, "start_status", None) or "idle", retain=True)
+    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/dry_heating_confirmed",
+                        getattr(tr, "heating_status", None) or "none", retain=True)
+
+
+@asynccontextmanager
+async def _device_connection(uri):
+    """The single device-link seam: native MQTT transport or legacy WebSocket.
+
+    Yields None only when the native transport cannot be built (fail closed);
+    the caller then waits and retries — the WebSocket is NEVER opened in mqtt
+    mode as a substitute."""
+    if DEVICE_TRANSPORT == "mqtt":
+        tr = _build_native_transport()
+        if tr is None:
+            yield None
+            return
+        async with tr:
+            yield tr
+    else:
+        async with websockets.connect(uri, ping_interval=None, ping_timeout=None,
+                                      close_timeout=1, open_timeout=10) as ws:
+            yield ws
+
+
 # --- WS LOOP (OPTIMIERT: Hält Verbindung bei WiFi-Paketen offen) ---
 async def update_limits_from_ws():
     global panda_ws, bind_confirmed, bind_warning_shown
@@ -1650,6 +1905,13 @@ async def update_limits_from_ws():
     while True:
 
         # 🔒 LOCK HANDLING
+        if global_lock and DEVICE_TRANSPORT == "mqtt":
+            # Native mode must never run the repeated WS-off lock loop. While a
+            # transport is live the recv loop below keeps draining telemetry, so
+            # an emergency OFF readback can still confirm; while it is down the
+            # emergency stop already used the native + bounded-fallback path.
+            await asyncio.sleep(2)
+            continue
         if global_lock:
 
             try:
@@ -1685,14 +1947,26 @@ async def update_limits_from_ws():
 
         # ===== NORMALER WS BETRIEB =====
         try:
-            async with websockets.connect(uri, ping_interval=None, ping_timeout=None, close_timeout=1, open_timeout=10) as websocket:
-
-                log_event(f"[WS] Connected to Panda {PANDA_IP}")
+            async with _device_connection(uri) as websocket:
+                if websocket is None:
+                    # Fail-closed native config: report the device unavailable
+                    # and retry — no other link is ever substituted.
+                    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/device_transport", "mqtt", retain=True)
+                    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/device_available", "OFF", retain=True)
+                    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/status",
+                                        "Panda Breath offline (native MQTT unavailable)", retain=True)
+                    await asyncio.sleep(10)
+                    continue
+                if DEVICE_TRANSPORT == "mqtt":
+                    log_event(f"[NATIVE] Device link over dedicated MQTT broker {DEVICE_MQTT_HOST} — no bind/get_settings init.", force_console=True)
+                else:
+                    log_event(f"[WS] Connected to Panda {PANDA_IP}")
                 panda_ws = websocket
 
                 # Only legacy emulation binds a printer. CC2 observes the device
                 # directly; rebinding its printer here is a configuration write.
-                if not CC2_ACTIVE and not power_forced_off:
+                # Native MQTT needs no init request at all — the state topic pushes.
+                if DEVICE_TRANSPORT != "mqtt" and not CC2_ACTIVE and not power_forced_off:
 
                     await websocket.send(json.dumps({
                         "printer": {
@@ -1723,14 +1997,29 @@ async def update_limits_from_ws():
                         continue
                     data = json.loads(msg)
 
+                    if DEVICE_TRANSPORT == "mqtt" and isinstance(data, dict):
+                        _native_snap = data.get("settings")
+                        if isinstance(_native_snap, dict):
+                            if "custom_timer" in _native_snap:
+                                # Native custom_timer is HOURS; the mod's existing
+                                # dry_time number keeps its minutes display.
+                                _native_snap["filament_timer"] = int(_native_snap["custom_timer"]) * 60
+                            _publish_native_device_status(websocket)
+
                     if global_lock:
+                        # Native mode keeps draining telemetry while locked (that
+                        # is what lets an emergency OFF readback confirm); no
+                        # processing or automation writes happen until unlock.
                         continue
 
                     # Nur verarbeiten wenn settings enthalten
                     if 'settings' in data:
 
                         # Read current device mode BEFORE reconnect can issue commands.
-                        if not bind_confirmed:
+                        # Native mode must NOT zero active-cycle data on (re)bind —
+                        # freshness invalidation is the transport's job, and dry
+                        # state must survive a broker reconnect.
+                        if not bind_confirmed and DEVICE_TRANSPORT != "mqtt":
                             last_ws_settings.clear()
                         last_ws_settings.update(data['settings'])
                         if 'work_mode' not in last_ws_settings:
@@ -1759,12 +2048,13 @@ async def update_limits_from_ws():
                             # an older capture is always detected as stale at send time.
                             _reconnect_gen = _cc2_heat_generation
                             chamber_target = _cc2_real_chamber_target()
-                            if chamber_target <= 0:
+                            if chamber_target <= 0 and DEVICE_TRANSPORT != "mqtt":
                                 await _resend_pending_off()
                             _reconnect_printing = (not CC2_ACTIVE) or current_data.get("cc2_print_status", "idle") in {
                                 "printing", "preheating", "paused", "pausing", "resuming", "stopping"
                             }
-                            if chamber_target > 0 and not power_forced_off and not global_lock and _reconnect_printing and not _panda_dryer_owns_control():
+                            if (DEVICE_TRANSPORT != "mqtt" and chamber_target > 0
+                                    and not power_forced_off and not global_lock and _reconnect_printing and not _panda_dryer_owns_control()):
                                 _reconnect_temp = (
                                     _preheat_overshoot_temp if (cc2_paused_for_preheat and _preheat_overshoot_temp > 0)
                                     else int(PANDA_MAX_TEMP) if (_cc2_dynamic_overshoot_active and CC2_ACTIVE)
@@ -2120,7 +2410,7 @@ async def update_limits_from_ws():
                                 elif _cc2_delta <= CC2_OVERSHOOT_MIN_DELTA:
                                     _cc2_dynamic_overshoot_active = False
                                 # send live set_temp update only on overshoot state change
-                                if _cc2_dynamic_overshoot_active != _prev_overshoot and panda_ws:
+                                if _cc2_dynamic_overshoot_active != _prev_overshoot and panda_ws and DEVICE_TRANSPORT != "mqtt":
                                     try:
                                         _new_st = int(PANDA_MAX_TEMP) if _cc2_dynamic_overshoot_active else int(target)
                                         _os_result = await panda_send_ordered(json.dumps({"settings": {"set_temp": _new_st}}), _loop_gen)
@@ -2172,7 +2462,11 @@ async def update_limits_from_ws():
                             if (panda_running or work_on_live in (1, True, "1")) and (now_stop - last_stop_command_time) >= 2.0:
                                 last_stop_command_time = now_stop
                                 try:
-                                    if panda_ws:
+                                    if DEVICE_TRANSPORT == "mqtt":
+                                        # Native: automation never writes to the device —
+                                        # explicit stops and the device's own reports rule.
+                                        log_event(f"[AUTO-OFF] Native mode — automation stop noted, no device command written (chamber={ist:.1f}°C)")
+                                    elif panda_ws:
                                         await panda_ws.send(json.dumps({
                                             "settings": {
                                                 "isrunning": 0,
@@ -2210,25 +2504,32 @@ async def update_limits_from_ws():
                                         else int(PANDA_MAX_TEMP) if (_cc2_dynamic_overshoot_active and CC2_ACTIVE)
                                         else int(target)
                                     )
-                                    heat_cmd: dict = {
-                                        "work_on": True,
-                                        "set_temp": _effective_target,
-                                        "isrunning": 1
-                                    }
-                                    if CC2_ACTIVE:
-                                        heat_cmd["work_mode"] = 2
-                                    _on_result = await panda_send_ordered(json.dumps({"settings": heat_cmd}), _loop_gen)
-                                    if _on_result is SendResult.SKIPPED:
-                                        log_event("[AUTO-ON] Heat-on skipped — superseded by a zero-target cancel or print end", force_console=True)
+                                    if DEVICE_TRANSPORT == "mqtt":
+                                        # Native: the loop never writes heat commands.
+                                        # The transport's readback-backed heating
+                                        # proof drives the Heat status instead.
+                                        log_event(f"[CC2-HEAT] Native mode — heat demand {int(target)}°C noted; no device command written")
                                         global_heating_state = RELAY_OFF
-                                    elif _on_result is SendResult.UNCONFIRMED:
-                                        raise RuntimeError("heat-on delivery unconfirmed")
                                     else:
-                                        # Poll immediately so device confirms isrunning=1 and
-                                        # heating flips to ON within ~0.5s instead of ~10s.
-                                        await asyncio.sleep(0.3)
-                                        if not CC2_ACTIVE:
-                                            await panda_send_ordered(json.dumps({"get_settings": 1}))
+                                        heat_cmd: dict = {
+                                            "work_on": True,
+                                            "set_temp": _effective_target,
+                                            "isrunning": 1
+                                        }
+                                        if CC2_ACTIVE:
+                                            heat_cmd["work_mode"] = 2
+                                        _on_result = await panda_send_ordered(json.dumps({"settings": heat_cmd}), _loop_gen)
+                                        if _on_result is SendResult.SKIPPED:
+                                            log_event("[AUTO-ON] Heat-on skipped — superseded by a zero-target cancel or print end", force_console=True)
+                                            global_heating_state = RELAY_OFF
+                                        elif _on_result is SendResult.UNCONFIRMED:
+                                            raise RuntimeError("heat-on delivery unconfirmed")
+                                        else:
+                                            # Poll immediately so device confirms isrunning=1 and
+                                            # heating flips to ON within ~0.5s instead of ~10s.
+                                            await asyncio.sleep(0.3)
+                                            if not CC2_ACTIVE:
+                                                await panda_send_ordered(json.dumps({"get_settings": 1}))
                                 except Exception as e:
                                     log_event(f"[AUTO-ON-ERR] target={int(target)}°C chamber={ist:.1f}°C: {e}", force_console=True)
                                     global_heating_state = RELAY_OFF  # Reset so next cycle retries
@@ -2237,7 +2538,11 @@ async def update_limits_from_ws():
                         actual_heating = (panda_running and work_on_live in (1, True, "1"))
                         # In CC2 mode device confirmation (isrunning) can lag; use our commanded
                         # state for the Heat tile. In legacy mode use device confirmation.
-                        heating_active = (global_heating_state == RELAY_ON) if CC2_ACTIVE else actual_heating
+                        # In native MQTT mode the device readback is the only proof.
+                        if DEVICE_TRANSPORT == "mqtt":
+                            heating_active = actual_heating
+                        else:
+                            heating_active = (global_heating_state == RELAY_ON) if CC2_ACTIVE else actual_heating
 
                         # State-transition logging — always on, not gated by DEBUG
                         _now_log = time.time()
@@ -2348,14 +2653,15 @@ async def update_limits_from_ws():
                 log_event(f"[WS] Connection error ({PANDA_IP}): {err}", force_console=True)
 
             panda_ws = None
-            last_ws_settings.clear()
+            if DEVICE_TRANSPORT != "mqtt":
+                last_ws_settings.clear()
             bind_confirmed = False  # Force work_mode=2 re-sync on next connect
             global_heating_state = RELAY_OFF  # Clear stale state so HA doesn't show Heat=ON while offline
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/heating", "OFF", retain=True)
             # Publish status while WS is down so HA MQTT keepalive timer resets every 5s
             # (without this, no data flows to HA during reconnect → keepalive timeout at 60s)
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/status", "Panda Breath offline", retain=True)
-            await asyncio.sleep(10)
+            await asyncio.sleep(2 if DEVICE_TRANSPORT == "mqtt" else 10)
 
 async def bind_watchdog():
     global bind_confirmed, bind_warning_shown
