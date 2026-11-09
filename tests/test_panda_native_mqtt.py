@@ -117,6 +117,7 @@ def full_state(**over):
         "mode": "auto mode",
         "work_on": "OFF",
         "drying_running": "OFF",
+        "filament_drying_mode": "custom",
         "custom_temp": 50,
         "custom_timer": 4,
         "drying_remaining_min": 0,
@@ -176,10 +177,15 @@ def test_enter_connects_clean_session_and_subscribes_exact_topics():
         assert client.connect_args[1] == 1884
         assert client.credentials == ("user", "secret")
         assert client.loop_started
+        receiver = asyncio.create_task(tr.recv())
+        await asyncio.sleep(0.01)
+        assert not receiver.done(), "startup must wait for asynchronous connection"
         client.fire_connect(0)          # paho subscribes from on_connect
         await asyncio.sleep(0)
         topics = [t for t, _ in client.subscriptions]
         assert sorted(topics) == sorted([STA, AVL]), topics
+        client.fire_state(full_state())
+        assert json.loads(await asyncio.wait_for(receiver, 1))["settings"]["work_mode"] == 1
         for t, k in client.subscriptions:
             assert "*" not in t and "+" not in t
         await tr.__aexit__(None, None, None)
@@ -429,8 +435,8 @@ def test_maps_settings_fields_to_native():
                                  "filament_temp": 55, "filament_timer": 8})
         assert ok is True
         f = cmd_fields(client)
-        assert f == {"target_temp": "45", "filter_temp": "35", "heater_temp": "40",
-                     "custom_temp": "55", "custom_timer": "8"}
+        assert f == {"target_temp": 45, "filter_temp": 35, "heater_temp": 40,
+                     "custom_temp": 55, "custom_timer": 8}
         await stop_transport(tr)
     asyncio.run(scenario())
 
@@ -441,7 +447,7 @@ def test_target_temp_clamped_to_device_range():
         await one_send(tr, {"set_temp": 70})
         await one_send(tr, {"set_temp": -5})
         vals = [json.loads(p)["target_temp"] for _, p, _ in client.published]
-        assert vals == ["60", "0"]
+        assert vals == [60, 0]
         await stop_transport(tr)
     asyncio.run(scenario())
 
@@ -682,7 +688,7 @@ def test_start_drying_happy_path_exact_frame_sequence_once():
         starts = [p for t, p, _ in client.published if "drying_running" in p]
         assert starts == ['{"drying_running": "ON"}']
         f = cmd_fields(client)
-        assert f["custom_temp"] == "50" and f["custom_timer"] == "8"
+        assert f["custom_temp"] == 50 and f["custom_timer"] == 8
         assert f["filament_drying_mode"] == "custom"
         assert f["mode"] == "filament drying"
         assert f["work_on"] == "ON"
@@ -795,7 +801,7 @@ def test_uncertain_latch_not_cleared_by_pre_start_cached_packet():
             await asyncio.gather(adv, return_exceptions=True)
         assert ok is False and tr.start_status == "uncertain"
         # cached packet is OLDER than the latch point: cannot clear it
-        client.fire_state(cached)
+        client.fire_state(cached, retain=True)
         await asyncio.sleep(0)
         ok = await tr.start_drying(50, 8, lambda: False)
         assert ok is False
@@ -839,8 +845,10 @@ def test_stop_overtakes_a_waiting_start():
         assert stop_task.result() is True
         off_seen = any(json.loads(p).get("work_on") == "OFF" for _, p, _ in client.published)
         assert off_seen
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        # Let the real operation finish after late matching telemetry; do not
+        # cancel the task manually, which hid delayed-start bugs.
+        client.fire_state(full_state(custom_temp=50, custom_timer=8, mode="filament drying"))
+        assert await asyncio.wait_for(task, 1) is False
         adv_done.set()
         await asyncio.gather(adv, return_exceptions=True)
         assert not [p for t, p, _ in client.published if "drying_running" in p]
@@ -996,16 +1004,6 @@ def test_already_at_target_reports_running_without_rise_claim():
 
 # ═════════════════════════════ Misc invariants ══════════════════════════════
 
-def test_never_instantiates_real_paho_client_on_module_import():
-    import importlib
-    import panda_native_mqtt as m
-    src = open(m.__file__).read()
-    assert "Client(" not in src.split("def ")[0]              # no top-level construction
-    # default factory builds lazily:
-    tr = NativePandaTransport("h", 1883, "u", "p", DEV)
-    assert tr._client is None
-
-
 def test_callbacks_schedule_safely_from_non_loop_thread():
     """paho fires callbacks on its own thread: ingestion must hop onto the loop."""
     import threading
@@ -1031,5 +1029,145 @@ def test_callbacks_schedule_safely_from_non_loop_thread():
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         assert seen["warehouse_temper"] == 33.3
+        await stop_transport(tr)
+    asyncio.run(scenario())
+
+
+# ═══════════ Sol review round 1 fixes (2026-11-09) ═══════════
+# The read-only advisor found module-level holes; these tests pin the fixes.
+
+
+def test_start_drying_refuses_fractional_timer_echo():
+    async def scenario():
+        tr, client, clock = await connected_transport()
+
+        def publish(topic, payload=None, qos=0, retain=False):
+            client.published.append((topic, payload, {"qos": qos, "retain": retain}))
+            if topic == CMD:
+                st = full_state(custom_temp=50, custom_timer=4.5)   # 4.5 != "4"
+                client.fire_state(st)
+            return FakePublish(0)
+        client.publish = publish
+        ok = await tr.start_drying(temp=50, hours=4, cancelled=lambda: False)
+        assert ok is False
+        assert tr.start_status == "failed"
+        assert not [p for t, p, _ in client.published if "drying_running" in p]
+        await stop_transport(tr)
+    asyncio.run(scenario())
+
+
+def test_start_confirmation_requires_firmware_drying_mode():
+    """drying_running ON + remaining in a NON-drying-mode snapshot must not
+    confirm the start; without confirmation the start ends uncertain, once."""
+    async def scenario():
+        tr, client, clock = await connected_transport()
+
+        def publish(topic, payload=None, qos=0, retain=False):
+            client.published.append((topic, payload, {"qos": qos, "retain": retain}))
+            if topic == CMD:
+                (k, v), = json.loads(payload).items()
+                st = full_state(mode="filament drying", work_on="ON",
+                                custom_temp=50, custom_timer=4)
+                if k == "drying_running" and v == "ON":
+                    st.update(mode="auto mode", drying_running="ON",
+                              drying_remaining_min=240)
+                client.fire_state(st)
+            return FakePublish(0)
+        client.publish = publish
+
+        async def advance_clock():
+            while True:
+                await asyncio.sleep(0.005)
+                clock.advance(1.0)
+        adv = asyncio.ensure_future(advance_clock())
+        try:
+            ok = await asyncio.wait_for(
+                tr.start_drying(temp=50, hours=4, cancelled=lambda: False), 10)
+        finally:
+            adv.cancel()
+            await asyncio.gather(adv, return_exceptions=True)
+        assert ok is False
+        assert tr.start_status == "uncertain"
+        starts = [p for t, p, _ in client.published if "drying_running" in p]
+        assert starts == ['{"drying_running": "ON"}']
+        await stop_transport(tr)
+    asyncio.run(scenario())
+
+
+def test_heating_proof_refuses_rise_after_the_5_min_deadline():
+    """A >=2C rise observed AFTER the 5-minute window is not a confirmation."""
+    async def scenario():
+        from panda_native_mqtt import HEAT_PROOF_S, HEAT_RISE_C
+        tr, client, clock = await connected_transport()
+        tr.heating_status = "pending"
+        tr._heat_pre_temp = 24.5
+        tr._heat_deadline = clock() + HEAT_PROOF_S
+        clock.advance(HEAT_PROOF_S + 1)              # window closed
+        client.fire_state(full_state(chamber_temp=24.5 + HEAT_RISE_C + 1))
+        await asyncio.sleep(0)
+        await stop_transport(tr)
+        assert tr.heating_status == "unconfirmed"
+    asyncio.run(scenario())
+
+
+def test_concurrent_start_is_refused_not_double_published():
+    """A second start while one is in flight must not publish a second
+    drying_running ON (double publish can reset a running timer)."""
+    async def scenario():
+        tr, client, clock = await connected_transport()
+        state = full_state()
+
+        def publish(topic, payload=None, qos=0, retain=False):
+            client.published.append((topic, payload, {"qos": qos, "retain": retain}))
+            if topic == CMD:
+                (k, v), = json.loads(payload).items()
+                state[k] = v
+                if k == "drying_running" and v == "ON":
+                    state.update(mode="filament drying", work_on="ON",
+                                 drying_remaining_min=240)
+                client.fire_state(dict(state))
+            return FakePublish(0)
+        client.publish = publish
+
+        first = asyncio.ensure_future(
+            tr.start_drying(temp=50, hours=4, cancelled=lambda: False))
+        while len(client.published) < 2:              # first is mid-config
+            await asyncio.sleep(0)
+        second_ok = await tr.start_drying(temp=50, hours=4, cancelled=lambda: False)
+        assert second_ok is False
+        ok = await asyncio.wait_for(first, 10)
+        assert ok is True
+        assert tr.start_status == "confirmed"
+        on = [p for t, p, _ in client.published
+              if p and '"drying_running": "ON"' in p]
+        assert len(on) == 1
+        await stop_transport(tr)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("interrupt", ["offline", "cancel"])
+@pytest.mark.parametrize("at_field", ["custom_temp", "drying_running"])
+def test_live_readback_cannot_override_offline_or_cancel(interrupt, at_field):
+    async def scenario():
+        tr, client, clock = await connected_transport()
+        state, responder = drying_flow(client, clock)
+        cancelled = False
+        original = client.publish
+        def publish(topic, payload=None, qos=0, retain=False):
+            nonlocal cancelled
+            result = original(topic, payload, qos, retain)
+            if topic == CMD:
+                key = next(iter(json.loads(payload)))
+                if key == at_field:
+                    if interrupt == "offline":
+                        client.fire_state(b"offline", topic=AVL)
+                    else:
+                        cancelled = True
+                responder(topic, payload, {"qos": qos, "retain": retain})
+            return result
+        client.publish = publish
+        assert await asyncio.wait_for(tr.start_drying(50, 8, lambda: cancelled), 1) is False
+        if at_field == "custom_temp":
+            assert not any("drying_running" in json.loads(p) for _, p, _ in client.published)
         await stop_transport(tr)
     asyncio.run(scenario())

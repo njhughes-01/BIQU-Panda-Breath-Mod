@@ -188,7 +188,7 @@ if DEVICE_TRANSPORT == "mqtt":
     if not CC2_ACTIVE:
         DEVICE_TRANSPORT_REJECT_REASON = ("PANDA_DEVICE_TRANSPORT=mqtt requires CC2_ACTIVE mode; "
                                           "legacy deployments keep the WebSocket (v1)")
-        DEVICE_TRANSPORT = "websocket"
+        DEVICE_MQTT_CONFIG_OK = False
     else:
         _missing = [n for n, v in (("PANDA_DEVICE_MQTT_HOST", DEVICE_MQTT_HOST),
                                    ("PANDA_DEVICE_MQTT_PASSWORD_FILE", DEVICE_MQTT_PASSWORD_FILE),
@@ -200,6 +200,7 @@ elif DEVICE_TRANSPORT != "websocket":
     DEVICE_TRANSPORT_REJECT_REASON = f"unknown PANDA_DEVICE_TRANSPORT={DEVICE_TRANSPORT!r}; using websocket"
     DEVICE_TRANSPORT = "websocket"
 _native_transport_factory = None   # test seam; None → real panda_native_mqtt.NativePandaTransport
+_native_transport_instance = None  # preserve uncertain starts across reconnects
 
 # Filament type → chamber target (°C). Override via CC2_FILAMENT_MAP env var (JSON).
 _DEFAULT_FILAMENT_MAP = {
@@ -1769,6 +1770,7 @@ def _build_native_transport():
     The broker password is read from its file at EVERY connect so a Docker
     secret rotation is picked up on reconnect. Any problem fails closed here:
     this function never falls back to the WebSocket."""
+    global _native_transport_instance
     if DEVICE_TRANSPORT != "mqtt" or not DEVICE_MQTT_CONFIG_OK:
         return None
     try:
@@ -1779,12 +1781,16 @@ def _build_native_transport():
     if not password:
         log_event("[NATIVE] Broker password file empty — failing closed", force_console=True)
         return None
+    if _native_transport_instance is not None:
+        _native_transport_instance.password = password
+        return _native_transport_instance
     factory = _native_transport_factory or pnm.NativePandaTransport
     try:
-        return factory(host=DEVICE_MQTT_HOST, port=DEVICE_MQTT_PORT,
+        _native_transport_instance = factory(host=DEVICE_MQTT_HOST, port=DEVICE_MQTT_PORT,
                        username=DEVICE_MQTT_USER, password=password,
                        device_id=DEVICE_MQTT_ID, logger=log_event)
-    except pnm.NativeConfigError as e:
+        return _native_transport_instance
+    except ValueError as e:
         log_event(f"[NATIVE] Transport config rejected: {e} — failing closed", force_console=True)
         return None
 
@@ -1834,7 +1840,7 @@ async def _native_emergency_stop() -> bool:
     if tr is not None and hasattr(tr, "emergency_stop"):
         try:
             if await tr.emergency_stop():
-                log_event("[EMERGENCY] Heater OFF confirmed by native device readback", force_console=True)
+                log_event("[EMERGENCY] Device reports power disabled and timer stopped; physical relay state unavailable", force_console=True)
                 return True
         except Exception as e:
             log_event(f"[EMERGENCY] Native stop raised {type(e).__name__}: {e}", force_console=True)
@@ -1842,7 +1848,7 @@ async def _native_emergency_stop() -> bool:
         log_event("[EMERGENCY] Native transport not connected — going straight to the bounded WebSocket fallback", force_console=True)
     res = await _native_ws_off_fallback()
     if res is True:
-        log_event("[EMERGENCY] Heater OFF confirmed via WebSocket echo (native unconfirmed)", force_console=True)
+        log_event("[EMERGENCY] Device reports power disabled via WebSocket; physical relay state unavailable", force_console=True)
         return True
     if res is None:
         log_event("[EMERGENCY] STOP UNCONFIRMED — off frame sent, no device OFF readback. "
@@ -2021,6 +2027,10 @@ async def update_limits_from_ws():
                         # state must survive a broker reconnect.
                         if not bind_confirmed and DEVICE_TRANSPORT != "mqtt":
                             last_ws_settings.clear()
+                        if DEVICE_TRANSPORT == "mqtt":
+                            # Native snapshots are complete: do not retain Dry-only
+                            # running flags across a change to manual/auto mode.
+                            last_ws_settings.clear()
                         last_ws_settings.update(data['settings'])
                         if 'work_mode' not in last_ws_settings:
                             # Temperature-only packets cannot establish control ownership.
@@ -2116,7 +2126,7 @@ async def update_limits_from_ws():
                         # Panda Breath was set to target + PREHEAT_OVERSHOOT_DELTA during warmup
                         # to accelerate heat soak. Once CC2 is within CC2_RESUME_OFFSET of target,
                         # drop PB back to real target then resume the print.
-                        if cc2_paused_for_preheat:
+                        if cc2_paused_for_preheat and (DEVICE_TRANSPORT != "mqtt" or getattr(websocket, "policy_authorized", False)):
                             _drop_gen = _cc2_heat_generation  # before the target read (see reconnect)
                             _target = _cc2_real_chamber_target()
                             _pb_ist = float(current_data.get("chamber_temp", 0))
@@ -2462,7 +2472,7 @@ async def update_limits_from_ws():
                             if (panda_running or work_on_live in (1, True, "1")) and (now_stop - last_stop_command_time) >= 2.0:
                                 last_stop_command_time = now_stop
                                 try:
-                                    if DEVICE_TRANSPORT == "mqtt":
+                                    if DEVICE_TRANSPORT == "mqtt" and not getattr(websocket, "policy_authorized", False):
                                         # Native: automation never writes to the device —
                                         # explicit stops and the device's own reports rule.
                                         log_event(f"[AUTO-OFF] Native mode — automation stop noted, no device command written (chamber={ist:.1f}°C)")
@@ -2504,7 +2514,7 @@ async def update_limits_from_ws():
                                         else int(PANDA_MAX_TEMP) if (_cc2_dynamic_overshoot_active and CC2_ACTIVE)
                                         else int(target)
                                     )
-                                    if DEVICE_TRANSPORT == "mqtt":
+                                    if DEVICE_TRANSPORT == "mqtt" and not getattr(websocket, "policy_authorized", False):
                                         # Native: the loop never writes heat commands.
                                         # The transport's readback-backed heating
                                         # proof drives the Heat status instead.
@@ -2540,7 +2550,8 @@ async def update_limits_from_ws():
                         # state for the Heat tile. In legacy mode use device confirmation.
                         # In native MQTT mode the device readback is the only proof.
                         if DEVICE_TRANSPORT == "mqtt":
-                            heating_active = actual_heating
+                            # Enabled/timer-running are not physical relay evidence.
+                            heating_active = getattr(websocket, "heating_status", None) == "confirmed"
                         else:
                             heating_active = (global_heating_state == RELAY_ON) if CC2_ACTIVE else actual_heating
 
@@ -2653,6 +2664,10 @@ async def update_limits_from_ws():
                 log_event(f"[WS] Connection error ({PANDA_IP}): {err}", force_console=True)
 
             panda_ws = None
+            if DEVICE_TRANSPORT == "mqtt":
+                mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/device_available", "OFF", retain=True)
+                mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/device_status_age", "unknown", retain=True)
+                mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/dry_heating_confirmed", "unknown", retain=True)
             if DEVICE_TRANSPORT != "mqtt":
                 last_ws_settings.clear()
             bind_confirmed = False  # Force work_mode=2 re-sync on next connect
@@ -3189,6 +3204,10 @@ async def ha_cc2_poller():
 async def main():
     global main_loop
     main_loop = asyncio.get_running_loop()
+    if DEVICE_TRANSPORT == "mqtt" and not DEVICE_MQTT_CONFIG_OK:
+        log_event("[CONFIG] Native MQTT configuration invalid; all device paths disabled", force_console=True)
+        await asyncio.Event().wait()
+        return
     asyncio.create_task(update_limits_from_ws())
     if CC2_HA_MODE:
         asyncio.create_task(ha_cc2_poller())

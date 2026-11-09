@@ -98,7 +98,7 @@ PANDA_DEVICE_MQTT_USER=panda_mod
 # PANDA_DEVICE_MQTT_ID — set in step 4, after the id has been seen live.
 ```
 
-The broker comes up with the overlay; validating first costs nothing and
+An empty device ID permits broker-only setup while the backend fails closed until the verified ID is supplied. Start only panda_device_mqtt during setup. The broker comes up with the overlay; validating first costs nothing and
 cannot print secrets (compose resolves paths and checks schema only):
 
 ```bash
@@ -131,17 +131,21 @@ async def main():
             "user": "panda_mod",
             "password": pw,
         }}))
-        print(await asyncio.wait_for(ws.recv(), 10))   # device echo — do not log it further
+        await asyncio.wait_for(ws.recv(), 10)  # consume privately; response may contain credentials
 asyncio.run(main())
 EOF
 ```
 
-Now watch the broker **read-only** — no `#` wildcard beyond the one Panda
-prefix, no payload dumps into files, credentials via stdin-safe `-I` not `-P`:
+Watch the dedicated broker read-only using the client secret file. Do not print setup responses or credentials. This needs the same paho package already installed in the mod container; run there with its secret mounted:
 
-```bash
-mosquitto_sub -h 10.88.88.129 -p 1884 -u panda_mod -I \
-  -t 'panda_breath/+/availability' -t 'panda_breath/+/state' -v -W 20
+```python
+import os, pathlib, paho.mqtt.client as mqtt
+c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+c.username_pw_set("panda_mod", pathlib.Path("/run/secrets/panda_device_mqtt_password").read_text().strip())
+c.on_connect = lambda c, u, f, r, p: c.subscribe("panda_breath/+/state")
+c.on_message = lambda c, u, m: print(m.topic, "retained=" + str(m.retain))
+c.connect("10.88.88.129", 1884, 30)
+c.loop_forever()  # stop after observing the exact topic identity; no payload dump
 ```
 
 Expect exactly one device id, `... online`/`... {"mode":...}` lines arriving
@@ -211,13 +215,11 @@ state telemetry only, never commands.
 ## Limits of v1
 
 * `mqtt` mode requires CC2 mode (`CC2_IP`/`CC2_HA_MODE`); legacy emulation
-  deployments stay on the WebSocket.
+  explicitly selecting MQTT on unsupported legacy mode fails closed. Default legacy deployments retain WebSocket.
 * The mod **never** changes the Panda's broker binding for you — that is the
   one-time `ha` setup object in step 3. Reverting the binding to the old HA
   broker (if that is where it pointed before) is also a manual `ha` object
   write, done only when you decide to abandon native mode entirely.
-* Chamber heat automation is command-disabled in native mode by design: the
-  loop reads device truth for status only, and only explicit requests write to
-  the device. (Native heat-on equivalents are a later change.)
+* Reconnects are observational. A new valid chamber heat request authorizes subsequent chamber control on that connection; saved preheat state and old telemetry cannot resume it. PETG and native timed-drying ownership remain protected.
 * No `--env-file` printing, no broker payload logging: nothing in this overlay
   writes secrets or message payloads to logs.

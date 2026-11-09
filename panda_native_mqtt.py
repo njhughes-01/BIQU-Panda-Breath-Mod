@@ -132,6 +132,10 @@ class NativePandaTransport:
         self._client = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._broker_connected = False
+        self.policy_authorized = False
+        self._stop_generation = 0
+        self._startup_deadline = None
+        self._session_has_state = False
         self._availability_online = True
 
         self._seq = 0
@@ -153,6 +157,12 @@ class NativePandaTransport:
     async def __aenter__(self):
         self._loop = asyncio.get_running_loop()
         self._new_data = asyncio.Event()
+        self._broker_connected = False
+        self._availability_online = True
+        self.policy_authorized = False
+        self._session_has_state = False
+        self._startup_deadline = self._loop.time() + 20.0
+        self._invalidate_freshness()
         factory = self._client_factory or _default_client_factory
         client = factory()
         self._client = client
@@ -176,7 +186,7 @@ class NativePandaTransport:
             except Exception:
                 pass
             try:
-                client.loop_stop(force=True)
+                client.loop_stop()
             except Exception:
                 pass
         self._broker_connected = False
@@ -240,6 +250,8 @@ class NativePandaTransport:
             return                       # other devices / command echo: ignored
         if retain:
             return                       # retained control/status never establishes freshness
+        if not self._broker_connected or not self._availability_online:
+            return
         try:
             native = json.loads(payload.decode("utf-8", "replace"))
         except (ValueError, UnicodeDecodeError):
@@ -255,8 +267,10 @@ class NativePandaTransport:
         self._latest = snap
         self._queue.append(snap)
         self._last_live_ts = ts
-        self._resolve_latch(native, snap[0])
-        self._observe_heating(native)
+        self._session_has_state = True
+        if self.available:
+            self._resolve_latch(native, snap[0])
+            self._observe_heating(native)
         if self._new_data is not None:
             self._new_data.set()
 
@@ -307,6 +321,10 @@ class NativePandaTransport:
 
     def _invalidate_freshness(self) -> None:
         self._last_live_ts = None
+        self._queue.clear()
+        self._latest = None
+        if self._new_data is not None:
+            self._new_data.set()
 
     @property
     def connected(self) -> bool:
@@ -367,6 +385,12 @@ class NativePandaTransport:
         assert self._loop is not None
         entry_seq = self._seq
         while True:
+            if not self._session_has_state and self._availability_online:
+                # Allow connect_async and the first firmware push to finish.
+                if self._loop.time() < self._startup_deadline:
+                    await self._tick()
+                    continue
+                raise DeviceUnavailable("device startup timed out")
             if not self._broker_connected:
                 raise DeviceUnavailable("device broker offline")
             while self._queue:
@@ -424,10 +448,12 @@ class NativePandaTransport:
         if not stop_command and not self.available:
             self._log("[NATIVE-MQTT] ordinary write rejected: device state stale/offline")
             return False
+        if stop_command:
+            self._stop_generation += 1
         for field, value in cmds:
             try:
                 r = self._client.publish(self.topic_command,
-                                         json.dumps({field: value}), qos=0, retain=False)
+                                         json.dumps({field: self._wire_value(field, value)}), qos=0, retain=False)
             except Exception as e:
                 self._log(f"[NATIVE-MQTT] publish error: {e}")
                 return False
@@ -435,7 +461,15 @@ class NativePandaTransport:
             if rc != 0:
                 self._log(f"[NATIVE-MQTT] broker refused {field} (rc={rc})")
                 return False
+        if not stop_command and (settings.get("work_on") in (True, 1) or settings.get("set_temp", 0) > 0):
+            self.policy_authorized = True
         return True
+
+    @staticmethod
+    def _wire_value(field, value):
+        if field in {"target_temp", "filter_temp", "heater_temp", "custom_temp", "custom_timer"}:
+            return _native_num_str(float(value))
+        return value
 
     def _translate(self, settings: dict):
         """Ordered [(native_field, str value)] or None to reject atomically."""
@@ -449,8 +483,8 @@ class NativePandaTransport:
                 and ("work_mode" not in settings or settings.get("work_mode") in (0, False))):
             return [("work_on", "OFF"), ("drying_running", "OFF")]
 
-        dry_now = self._latest is not None and \
-            self._latest[2].get("mode") == "filament drying"
+        dry_now = (settings.get("work_mode") == 3 if "work_mode" in settings else
+                   self._latest is not None and self._latest[2].get("mode") == "filament drying")
         out: dict = {}
         for key, val in settings.items():
             if key == "set_temp":
@@ -523,6 +557,9 @@ class NativePandaTransport:
         Cancellation is honoured before every publish and after every wait, and
         never blocks a concurrent stop.
         """
+        stop_generation = self._stop_generation
+        caller_cancelled = cancelled
+        cancelled = lambda: caller_cancelled() or self._stop_generation != stop_generation
         if self._latch_seq is not None:
             # An earlier start is unresolved: refuse until FRESH telemetry after
             # that publish resolves running/idle. Duplicate requests cannot
@@ -554,38 +591,36 @@ class NativePandaTransport:
             self._log("[NATIVE-DRY] start refused: device reports an active cycle")
             return False
 
+        if self._start_op_busy:
+            # A start is already in flight (config writes or timer publish):
+            # a second concurrent start could double-publish drying_running ON
+            # and reset the running timer (Sol review).
+            self.start_status = "failed"
+            self._log("[NATIVE-DRY] start refused: another start in flight")
+            return False
         self.start_status = "confirming"
 
         steps = [("custom_temp", str(temp)), ("custom_timer", str(hours)),
                  ("filament_drying_mode", "custom"), ("mode", "filament drying"),
                  ("work_on", "ON")]
-        for field, value in steps:
-            if cancelled():
-                self.start_status = "failed"
-                return False
-            point = self._seq
-            if not await self._publish_one(field, value):
-                self.start_status = "failed"
-                return False
-            ok = await self._wait_field(field, value, after_seq=point,
-                                        timeout=CONFIG_READBACK_S,
-                                        cancelled=cancelled)
-            if not ok:
-                self.start_status = "failed"
-                if cancelled():
-                    return False
-                self._log(f"[NATIVE-DRY] config {field}={value} not confirmed by device")
-                return False
-            if cancelled():
-                self.start_status = "failed"
-                return False
-
-        if cancelled():
+        self._start_op_busy = True
+        try:
+            steps_ok = await self._run_start_steps(steps, cancelled)
+        finally:
+            self._start_op_busy = False
+        if not steps_ok:
             self.start_status = "failed"
             return False
+
         # Pre-start temperature for the heating proof: the freshest device
         # reading just before the timer start, not the one at operation entry.
         pre_start_temp = float(self._latest[2].get("chamber_temp", 0.0))
+        if self._latch_seq is not None or self._start_op_busy:
+            # Another start armed its uncertain latch while we configured.
+            self.start_status = "failed"
+            self._log("[NATIVE-DRY] start aborted before timer ON: "
+                      "another start is active")
+            return False
         point = self._seq
         self._arm_uncertain(point)
         self._start_op_busy = True
@@ -616,11 +651,44 @@ class NativePandaTransport:
             self._start_heat_watch(pre_start_temp, float(temp))
         return True
 
+    async def _run_start_steps(self, steps, cancelled) -> bool:
+        """Config writes with per-field device read-back.
+
+        The caller owns _start_op_busy across this call."""
+        for field, value in steps:
+            if cancelled():
+                self.start_status = "failed"
+                return False
+            point = self._seq
+            if not await self._publish_one(field, value):
+                self.start_status = "failed"
+                return False
+            ok = await self._wait_field(field, value, after_seq=point,
+                                        timeout=CONFIG_READBACK_S,
+                                        cancelled=cancelled)
+            if not ok:
+                self.start_status = "failed"
+                if cancelled():
+                    return False
+                self._log(f"[NATIVE-DRY] config {field}={value} not confirmed by device")
+                return False
+            if cancelled():
+                self.start_status = "failed"
+                return False
+
+        if cancelled():
+            self.start_status = "failed"
+            return False
+        return True
+
     async def _publish_one(self, field: str, value) -> bool:
         if not self._broker_connected or self._client is None:
             return False
+        is_off = field in ("work_on", "drying_running") and value == "OFF"
+        if not is_off and not self.available:
+            return False
         try:
-            r = self._client.publish(self.topic_command, json.dumps({field: value}),
+            r = self._client.publish(self.topic_command, json.dumps({field: self._wire_value(field, value)}),
                                      qos=0, retain=False)
         except Exception as e:
             self._log(f"[NATIVE-DRY] publish error: {e}")
@@ -658,6 +726,8 @@ class NativePandaTransport:
         """
         deadline = self._clock() + timeout
         while True:
+            if cancelled() or not self.available:
+                return False
             snap = self._latest
             if snap is not None and snap[0] > after_seq:
                 native = snap[2]
@@ -666,9 +736,8 @@ class NativePandaTransport:
                         return True
                     return False
                 if field == "filament_drying_mode":
-                    # The firmware state object does not echo this field; a live
-                    # packet after the write is the most it can report.
-                    return True
+                    # An unrelated live packet does not confirm custom selection.
+                    return False
             if cancelled():
                 return False
             if not self._broker_connected:
@@ -680,7 +749,9 @@ class NativePandaTransport:
     @staticmethod
     def _field_matches(actual, field, expected: str) -> bool:
         if field in ("custom_temp", "custom_timer"):
-            return _is_finite_number(actual) and int(actual) == int(expected)
+            # Exact numeric equality: a device echo of 4.5 for a requested 4 is
+            # a MISMATCH, not an int()-truncated confirmation (Sol review).
+            return _is_finite_number(actual) and float(actual) == float(expected)
         return actual == expected
 
     async def _wait_start_confirmed(self, *, after_seq: int, hours: int,
@@ -688,12 +759,18 @@ class NativePandaTransport:
                                     cancelled: Callable[[], bool]) -> bool:
         deadline = self._clock() + timeout
         while True:
+            if cancelled() or not self.available:
+                return False
             snap = self._latest
             if snap is not None and snap[0] > after_seq:
                 native = snap[2]
                 running = _strict_on_off(native.get("drying_running"))
                 remaining = native.get("drying_remaining_min")
-                if running and _is_finite_number(remaining) \
+                # A drying_running=ON echo from a NON-drying mode snapshot does
+                # not prove the dry cycle runs: require the firmware's own mode
+                # field (Sol review).
+                if running and native.get("mode") == "filament drying" \
+                        and _is_finite_number(remaining) \
                         and 1 <= float(remaining) <= hours * 60:
                     return True
             if cancelled() or not self._broker_connected:
@@ -729,20 +806,24 @@ class NativePandaTransport:
             pass
 
     def _observe_heating(self, native: dict) -> None:
-        if self.heating_status != "pending" or self._heat_pre_temp is None:
+        if not self.available or self.heating_status != "pending" or self._heat_pre_temp is None:
+            return
+        # Deadline is checked FIRST: a >=2C rise observed after the 5-minute
+        # window must NOT confirm (Sol review).
+        if self._heat_deadline is not None and self._clock() >= self._heat_deadline:
+            self.heating_status = "unconfirmed"
             return
         temp = native.get("chamber_temp")
         if _is_finite_number(temp) and temp >= self._heat_pre_temp + HEAT_RISE_C:
             self.heating_status = "confirmed"
             self._log(f"[NATIVE-DRY] heating confirmed: {self._heat_pre_temp:.1f}C "
                       f"-> {temp:.1f}C (>= +{HEAT_RISE_C}C)")
-        elif self._heat_deadline is not None and self._clock() >= self._heat_deadline:
-            self.heating_status = "unconfirmed"
 
     # ── emergency stop ───────────────────────────────────────────────────────
     async def emergency_stop(self) -> bool:
         """Publish the native off pair and CONFIRM it only from post-write
         device telemetry. Never claims heater-off from broker rc alone."""
+        self._stop_generation += 1
         if not self._broker_connected or self._client is None:
             return False
         point = self._seq
@@ -752,7 +833,7 @@ class NativePandaTransport:
         deadline = self._clock() + OFF_READBACK_S
         while True:
             snap = self._latest
-            if snap is not None and snap[0] > point:
+            if self.available and snap is not None and snap[0] > point:
                 native = snap[2]
                 if _strict_on_off(native.get("work_on")) is False and \
                         _strict_on_off(native.get("drying_running")) is False:

@@ -44,7 +44,7 @@ services:
       PANDA_DEVICE_MQTT_PASSWORD_FILE: /run/secrets/panda_device_mqtt_password
       # Pin the device identity VERIFIED live on the broker. Do not assume a
       # MAC-derived id before it has been seen in panda_breath/+/state output.
-      PANDA_DEVICE_MQTT_ID: ${PANDA_DEVICE_MQTT_ID:?set PANDA_DEVICE_MQTT_ID to the device id verified live in step 3 of docs/native-mqtt.md}
+      PANDA_DEVICE_MQTT_ID: ${PANDA_DEVICE_MQTT_ID:-}
     secrets:
       - panda_device_mqtt_password
     # Fail closed rather than crash-looping if the device broker is absent.

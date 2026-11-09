@@ -1863,8 +1863,9 @@ def test_mqtt_config_without_cc2_active_is_rejected_clearly(tmp_path):
     (tmp_path / "pwpw").write_text("s3cret\n")
     mod, client = load_panda(cc2_ip="", env_extra=dict(
         MQTT_ENV, PANDA_DEVICE_MQTT_PASSWORD_FILE=str(tmp_path / "pwpw")))
-    # Legacy (non-CC2) deployments stay on the WebSocket, always, in v1.
-    assert mod.DEVICE_TRANSPORT == "websocket"
+    # Explicit MQTT selection is fail-closed even for unsupported legacy mode.
+    assert mod.DEVICE_TRANSPORT == "mqtt"
+    assert mod.DEVICE_MQTT_CONFIG_OK is False
     assert "requires CC2" in mod.DEVICE_TRANSPORT_REJECT_REASON
 
 
@@ -1895,6 +1896,8 @@ def test_mqtt_first_snapshot_sends_no_policy_commands(tmp_path):
     mod._panda_off_pending = True
     mod._panda_off_pending_at = time.time()
     _arm_asa_printing(mod, tmp_path)
+    mod.cc2_paused_for_preheat = True
+    mod.current_data["cc2_chamber_temp"] = 60
     def _replay():
         raise AssertionError("native reconnect must not replay _resend_pending_off")
     mod._resend_pending_off = _replay
@@ -1905,12 +1908,13 @@ def test_mqtt_first_snapshot_sends_no_policy_commands(tmp_path):
 
 
 def test_mqtt_reconnect_invalidates_without_replaying_anything(tmp_path):
-    # Transport dies mid-stream: the loop must reconnect (fresh factory call,
-    # new transport), must not replay pending-off or any heat command, and the
+    # Transport dies mid-stream: reuse the transport so uncertain starts survive,
+    # do not replay pending-off or any heat command, and the
     # except path must not zero native active-cycle data.
     ft1 = _FakeNativeTransport(raise_on_recv=panda_native_mqtt.DeviceUnavailable("gone"))
     ft2 = _FakeNativeTransport()
-    mod, client, created = _mqtt_mod(tmp_path, [ft1, ft2])
+    mod, client, created = _mqtt_mod(tmp_path, [ft1])
+    ft1.start_status = "uncertain"
     mod._panda_off_pending = True
     mod._panda_off_pending_at = time.time()
     _arm_asa_printing(mod, tmp_path)
@@ -1919,9 +1923,10 @@ def test_mqtt_reconnect_invalidates_without_replaying_anything(tmp_path):
     mod._resend_pending_off = _replay
     with patch.object(mod.websockets, "connect", _no_ws_connect()), \
          patch.object(mod, "log_event"):
-        _run_loop_briefly(mod, lambda: len(created) >= 2 and ft2.recv_calls >= 1, timeout=15.0)
-    assert ft1.exited == 1 and ft2.entered >= 1
-    assert ft1.sent == [] and ft2.sent == [] and ft2.starts == []
+        _run_loop_briefly(mod, lambda: ft1.entered >= 2, timeout=15.0)
+    assert ft1.exited >= 1 and ft1.entered >= 2
+    assert len(created) == 1 and ft1.start_status == "uncertain"
+    assert ft1.sent == [] and ft1.starts == []
 
 
 def test_native_snapshot_publishes_dry_time_as_minutes(tmp_path):
@@ -2092,7 +2097,8 @@ def test_mqtt_emergency_falls_back_to_one_bounded_ws_frame(tmp_path):
     assert ft.emergency_calls == 1
     assert ws.log == [{"settings": {"isrunning": 0, "work_on": False, "set_temp": 0}}]
     msgs = " ".join(str(c.args[0]) for c in log.call_args_list if c.args)
-    assert "OFF confirmed via WebSocket echo" in msgs
+    assert "Device reports power disabled via WebSocket" in msgs
+    assert "physical relay state unavailable" in msgs
     assert "UNCONFIRMED" not in msgs
 
 
