@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import asyncio, ssl, json, time, requests, websockets, os, socket, threading
+import asyncio, ssl, json, time, requests, websockets, os, socket, threading, enum
 import logging
 import paho.mqtt.client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
@@ -266,6 +266,26 @@ cc2_paused_for_preheat = False  # True when we paused the CC2 to wait for chambe
 _preheat_overshoot_temp = 0    # set_temp sent to Panda Breath during preheat (target + overshoot delta)
 _cc2_dynamic_overshoot_active = False  # True when CC2 far cold mid-print — boost PB to PANDA_MAX_TEMP
 _last_cc2_resume_attempt = 0.0
+# --- Preheat cancel coordination (zero-target materials like PETG) -----------
+# _cc2_heat_generation: bumped when a no-heat material cancels pending work;
+#   heat coroutines compare their captured generation before every side effect.
+# _cc2_pause_in_flight: True between an integration pause press and the next
+#   resume press / print-end / preheat-state clear. Used ONLY to word cancel
+#   logs accurately — it never authorizes an action.
+# _cc2_heat_claim_gen: generation that claimed cc2_paused_for_preheat, so a
+#   cancelled coroutine only un-sets the flag it still owns.
+# Ownership rule: the CC2 protocol gives no acknowledgement tying an observed
+# "paused" status to our pause press, and a simultaneous user pause is
+# indistinguishable from ours. A cancel therefore NEVER presses resume. If a
+# pause was already dispatched (or the printer is paused under a preheat
+# claim), we clear our state, leave the printer alone, and log that a manual
+# resume may be needed.
+_cc2_heat_generation = 0
+_cc2_pause_in_flight = False
+_cc2_pause_in_flight_at = 0.0
+_cc2_heat_claim_gen = -1  # -1 = no live coroutine claim (e.g. state restored from disk)
+_CC2_IN_FLIGHT_WINDOW = 60.0  # seconds a pause press stays plausibly "landing" (log wording only)
+_cc2_heat_lock = threading.RLock()
 
 PREHEAT_STATE_FILE = BASE_DIR / "preheat_state.json"
 PREHEAT_STATE_MAX_AGE = 43200  # 12h — discard persisted state older than this
@@ -304,13 +324,87 @@ _load_preheat_state()
 
 def _clear_cc2_preheat_state():
     global cc2_paused_for_preheat, _preheat_overshoot_temp
+    global _cc2_pause_in_flight, _cc2_heat_claim_gen
     cc2_paused_for_preheat = False
     _preheat_overshoot_temp = 0
+    with _cc2_heat_lock:
+        _cc2_pause_in_flight = False
+        _cc2_heat_claim_gen = -1
     _save_preheat_state()
+
+def _cc2_in_flight_valid():
+    """True when an integration pause press is recent enough that its 'paused'
+    may still land. Only used for cancel log wording — never authorizes action."""
+    return _cc2_pause_in_flight and (time.time() - _cc2_pause_in_flight_at) < _CC2_IN_FLIGHT_WINDOW
+
+def _cancel_cc2_preheat_zero_target():
+    """Cancel pending/in-progress preheat when the material resolves to zero target.
+
+    Conservative by design: bumps the heat generation so scheduled coroutines
+    abort before their next side effect, and clears integration preheat state.
+    NEVER presses resume — the CC2 protocol provides no acknowledgement tying an
+    observed 'paused' status to our pause press, so once a pause is dispatched
+    (or the printer is already paused under a preheat claim) ownership is
+    unprovable and a simultaneous user pause is indistinguishable. In that case
+    we leave the printer paused and log that a manual resume may be needed.
+    """
+    global _cc2_heat_generation
+    status = current_data.get("cc2_print_status", "")
+    with _cc2_heat_lock:
+        _cc2_heat_generation += 1
+        owned = cc2_paused_for_preheat
+        in_flight = _cc2_in_flight_valid()
+        if owned or in_flight:
+            _clear_cc2_preheat_state()
+    if in_flight:
+        log_event(
+            "[CC2-SLICER] Zero-target material cancelled preheat while an integration "
+            f"pause press was dispatched or still landing (status={status!r}). The CC2 "
+            "protocol cannot prove the resulting pause is ours (a user pause is "
+            "indistinguishable) — not auto-resuming. If the printer is or becomes "
+            "paused, resume manually when ready.",
+            force_console=True)
+    elif owned and status in ("paused", "pausing"):
+        log_event(
+            "[CC2-SLICER] Zero-target material cancelled preheat while the printer is "
+            f"paused under a preheat claim (status={status!r}). Pause ownership is not "
+            "provable via the protocol (the pause may be the user's) — not auto-resuming. "
+            "Resume manually if desired.",
+            force_console=True)
+    elif owned:
+        log_event(
+            "[CC2-SLICER] Zero-target material cancelled preheat before any pause press "
+            f"was dispatched (status={status!r}) — the pending pause was skipped.",
+            force_console=True)
+    else:
+        log_event(
+            "[CC2-SLICER] Zero-target material cancelled pending preheat work "
+            f"(status={status!r}) — no integration pause claimed or dispatched.",
+            force_console=True)
+
+def _mark_cc2_filament_unresolved():
+    """HA poller could not resolve the active material this cycle.
+
+    Drop a buffered non-filename material so a stale value from a previous job
+    cannot suppress the unknown-material fallback (CC2_HA_FALLBACK_TEMP) when the
+    next print starts. Filename-derived targets (FILENAME-NNC) stay authoritative.
+    """
+    # Never during a running job: a transient HA/sensor loss mid-print must not erase
+    # the material resolved for it (the later re-read would re-arm heat / re-pause).
+    # The new job's own start is still covered: the poller marks unresolved before it
+    # applies print_status, and the previous status is idle at that moment.
+    if current_data.get("cc2_print_status", "idle") in {"printing", "preheating", "paused", "pausing", "resuming", "stopping"}:
+        return
+    pending = current_data.get("cc2_pending_filament", "")
+    if pending and not pending.startswith("FILENAME-"):
+        log_event(f"[CC2-HA] Active filament unresolved — dropping stale buffered material {pending!r}", force_console=True)
+        current_data["cc2_pending_filament"] = ""
+        current_data["cc2_resolved_filament"] = ""
 
 terminal_cleared = False
 # Merkt sich den letzten vollständigen WS-Settings-Stand
 last_ws_settings = {}
+_dry_generation = 0
 power_forced_off = False # Ergänzt für Logik-Vollständigkeit
 
 # ============================================================
@@ -419,7 +513,7 @@ async def slicer_auto_parser():
                             current_data["chamber_setpoint"] = new_target
                             if panda_ws:
                                 asyncio.run_coroutine_threadsafe(
-                                    panda_ws.send(json.dumps({"settings": {"set_temp": int(new_target)}})),
+                                    panda_send_ordered(json.dumps({"settings": {"set_temp": int(new_target)}}), _cc2_heat_generation),
                                     main_loop
                                 )
                             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", int(new_target), retain=True)
@@ -435,6 +529,7 @@ async def slicer_auto_parser():
 def _handle_cc2_data(cc2_key, val):
     """Process a single CC2 key/value pair — called from MQTT handler and HA poller."""
     global cc2_paused_for_preheat, _preheat_overshoot_temp, global_heating_state
+    global _cc2_pause_in_flight, _cc2_heat_generation
     _cc2_printing_states = {"printing", "preheating", "paused", "pausing", "resuming", "stopping"}
     if cc2_key == "bed_temp":
         current_data["bed_temp"] = safe_float(val, current_data.get("bed_temp", 0.0))
@@ -450,17 +545,20 @@ def _handle_cc2_data(cc2_key, val):
             # Clear retained active_filament_type so next print doesn't preheat-pause immediately
             mqtt_client.publish(f"{CC2_TOPIC_PREFIX}/active_filament_type", "", retain=True)
             current_data["cc2_pending_filament"] = ""
+            current_data["cc2_resolved_filament"] = ""
             current_data["slicer_soll"] = 0.0
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_soll", 0, retain=True)
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_target_temp", 0, retain=True)
             log_event(f"[CC2-SLICER] Print ended ({prev_status}→{new_status}), turning off chamber heater", force_console=True)
+            with _cc2_heat_lock:
+                # Invalidate any heat coroutine still in flight: after the print is over it
+                # must not send a heat-on behind the off, claim a preheat pause or press pause.
+                _cc2_heat_generation += 1
+                _cc2_pause_in_flight = False
             if cc2_paused_for_preheat:
                 _clear_cc2_preheat_state()
             async def _cc2_off():
-                try:
-                    await panda_send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "set_temp": 0}}))
-                except Exception as e:
-                    log_event(f"[CC2-OFF-ERR] Failed to turn off heater at print end: {e}", force_console=True)
+                await _send_heater_off("Print end")
             asyncio.run_coroutine_threadsafe(_cc2_off(), main_loop)
         # Re-arm heating when print starts — handles retained active_filament_type
         # arriving before print_status on MQTT reconnect or container restart
@@ -507,33 +605,51 @@ def _handle_cc2_data(cc2_key, val):
                     # Resume logic releases the pause once real temp confirms warm enough.
                     effective_chamber = 0.0
                 needs_preheat = effective_chamber < (chamber_target - 5) and not cc2_paused_for_preheat
+                generation = _cc2_heat_generation
                 async def _cc2_heat_on_start(t=int(chamber_target), pause=needs_preheat):
                     global cc2_paused_for_preheat, global_heating_state, _preheat_overshoot_temp
+                    global _cc2_heat_claim_gen, _cc2_pause_in_flight, _cc2_pause_in_flight_at
                     if cc2_paused_for_preheat:
                         # Preheat already in progress (overshoot active) — don't override
                         log_event(f"[CC2-SLICER] Preheat already active ({_preheat_overshoot_temp}°C overshoot) — skipping redundant heat command", force_console=True)
                         return
                     preheat_temp = min(t + int(PREHEAT_OVERSHOOT_DELTA), int(PANDA_MAX_TEMP)) if pause else t
-                    try:
-                        await panda_send(json.dumps({"settings": {"isrunning": 0}}))
-                        await asyncio.sleep(0.2)
-                        await panda_send(json.dumps({
-                            "settings": {"work_mode": 2, "work_on": True, "set_temp": preheat_temp, "isrunning": 1}
-                        }))
-                        await asyncio.sleep(0.3)
-                        await panda_send(json.dumps({"get_settings": 1}))
+                    result = await _cc2_send_heat_sequence(generation, preheat_temp)
+                    if result is SendResult.SKIPPED: return
+                    if result is SendResult.UNCONFIRMED:
+                        log_event("[CC2-START-HEAT-ERR] Heat-on delivery UNCONFIRMED (send timed out or link "
+                                  "down) — assuming the heater may be on and continuing the preheat pause", force_console=True)
+                    # The sends awaited: a cancel (MQTT thread) may have landed meanwhile.
+                    # Check + assign atomically under the lock.
+                    with _cc2_heat_lock:
+                        if generation != _cc2_heat_generation: return
                         global_heating_state = RELAY_ON
                         if pause:
                             _preheat_overshoot_temp = preheat_temp
-                    except Exception as e:
-                        log_event(f"[CC2-START-HEAT-ERR] {e}", force_console=True)
-                        return
                     if pause and not cc2_paused_for_preheat:
+                        with _cc2_heat_lock:
+                            # Claim only if no cancel has landed since the last check.
+                            if generation != _cc2_heat_generation: return
+                            cc2_paused_for_preheat = True  # set before sleep to survive WS reconnect in the gap
+                            _cc2_heat_claim_gen = generation
+                            _save_preheat_state()
                         log_event(f"[CC2-SLICER] Chamber cold ({chamber_now:.0f}°C), pausing CC2 — heating to {preheat_temp}°C (overshoot), target {t}°C", force_console=True)
-                        cc2_paused_for_preheat = True  # set before sleep to survive WS reconnect in the gap
-                        _save_preheat_state()
                         await asyncio.sleep(1.5)
-                        _cc2_press_button("pause")
+                        with _cc2_heat_lock:
+                            if generation != _cc2_heat_generation:
+                                # Cancelled by a zero-target material — release only our own claim.
+                                if _cc2_heat_claim_gen == generation and cc2_paused_for_preheat:
+                                    cc2_paused_for_preheat = False
+                                    _cc2_heat_claim_gen = -1
+                                    _save_preheat_state()
+                                return
+                            # Generation check, in-flight marker and press dispatch are
+                            # atomic under the lock: a cancel can never interleave
+                            # between the marker and the dispatch, so any cancel that
+                            # runs after this point sees the press as in flight.
+                            _cc2_pause_in_flight = True
+                            _cc2_pause_in_flight_at = time.time()
+                            _cc2_press_button("pause")
                 if main_loop:
                     asyncio.run_coroutine_threadsafe(_cc2_heat_on_start(), main_loop)
                 log_event(f"[CC2-SLICER] Print started, re-arming chamber heat to {chamber_target:.0f}°C", force_console=True)
@@ -555,7 +671,11 @@ def _handle_cc2_data(cc2_key, val):
                 _eff = 0.0
             if chamber_target > 0 and _eff < (chamber_target - CC2_RESUME_OFFSET):
                 log_event(f"[CC2-SLICER] CC2 started printing (was preheating) but chamber cold ({_eff:.0f}°C) — re-sending pause", force_console=True)
-                _cc2_press_button("pause")
+                with _cc2_heat_lock:
+                    # Re-check under the lock: a zero-target cancel may have cleared
+                    # the claim between the status handler's read and this dispatch.
+                    if cc2_paused_for_preheat:
+                        _cc2_press_button("pause")
             elif chamber_target > 0:
                 log_event(f"[CC2-SLICER] CC2 started printing and chamber is resume-ready ({_eff:.0f}°C), keeping print running", force_console=True)
                 _clear_cc2_preheat_state()
@@ -588,6 +708,7 @@ def _handle_cc2_data(cc2_key, val):
             and not (
                 current_data.get("cc2_print_status", "idle") in _cc2_printing_states
                 and float(current_data.get("chamber_setpoint", 0)) == 0
+                and current_data.get("cc2_resolved_filament") != val
             )
         ):
             return
@@ -602,6 +723,7 @@ def _handle_cc2_data(cc2_key, val):
         if target is None:
             log_event(f"[CC2-SLICER] Unknown filament type {val!r}, no chamber target", force_console=True)
             return
+        current_data["cc2_resolved_filament"] = val
         if match and match != val.upper():
             log_event(f"[CC2-SLICER] Fuzzy filament match: {val!r} → {match!r} → {target}°C", force_console=True)
         current_data["chamber_setpoint"] = float(target)
@@ -624,49 +746,62 @@ def _handle_cc2_data(cc2_key, val):
                 effective_chamber = 0.0
             # Don't re-pause on MQTT reconnect delivering retained active_filament_type
             needs_preheat = effective_chamber < (float(target) - 5) and not cc2_paused_for_preheat
+            generation = _cc2_heat_generation
             async def _cc2_heat(t=int(target), pause=needs_preheat):
                 global cc2_paused_for_preheat, global_heating_state, _preheat_overshoot_temp
+                global _cc2_heat_claim_gen, _cc2_pause_in_flight, _cc2_pause_in_flight_at
                 preheat_temp = min(t + int(PREHEAT_OVERSHOOT_DELTA), int(PANDA_MAX_TEMP)) if pause else t
-                try:
-                    await panda_send(json.dumps({"settings": {"isrunning": 0}}))
-                    await asyncio.sleep(0.2)
-                    await panda_send(json.dumps({
-                        "settings": {
-                            "work_mode": 2,
-                            "work_on": True,
-                            "set_temp": preheat_temp,
-                            "isrunning": 1
-                        }
-                    }))
-                    await asyncio.sleep(0.3)
-                    await panda_send(json.dumps({"get_settings": 1}))
+                result = await _cc2_send_heat_sequence(generation, preheat_temp)
+                if result is SendResult.SKIPPED: return
+                if result is SendResult.UNCONFIRMED:
+                    log_event(f"[CC2-HEAT-ERR] Heat-on delivery UNCONFIRMED (target={t}°C; send timed out or link "
+                              "down) — assuming the heater may be on and continuing the preheat pause", force_console=True)
+                # The sends awaited: a cancel (MQTT thread) may have landed meanwhile.
+                # Check + assign atomically under the lock.
+                with _cc2_heat_lock:
+                    if generation != _cc2_heat_generation: return
                     global_heating_state = RELAY_ON  # update immediately; GUI shows ON without waiting for WS confirm
                     if pause:
                         _preheat_overshoot_temp = preheat_temp
-                except Exception as e:
-                    log_event(f"[CC2-HEAT-ERR] Failed to send heat command (target={t}°C): {e}", force_console=True)
-                    return
                 if pause and not cc2_paused_for_preheat:
+                    with _cc2_heat_lock:
+                        # Claim only if no cancel has landed since the last check.
+                        if generation != _cc2_heat_generation: return
+                        cc2_paused_for_preheat = True  # set before sleep to survive WS reconnect in the gap
+                        _cc2_heat_claim_gen = generation
+                        _save_preheat_state()
                     log_event(f"[CC2-SLICER] Chamber cold ({chamber_now:.0f}°C), pausing CC2 — heating to {preheat_temp}°C (overshoot), target {t}°C", force_console=True)
-                    cc2_paused_for_preheat = True  # set before sleep to survive WS reconnect in the gap
-                    _save_preheat_state()
                     await asyncio.sleep(1.5)
-                    _cc2_press_button("pause")
+                    with _cc2_heat_lock:
+                        if generation != _cc2_heat_generation:
+                            # Cancelled by a zero-target material — release only our own claim.
+                            if _cc2_heat_claim_gen == generation and cc2_paused_for_preheat:
+                                cc2_paused_for_preheat = False
+                                _cc2_heat_claim_gen = -1
+                                _save_preheat_state()
+                            return
+                        # Generation check, in-flight marker and press dispatch are
+                        # atomic under the lock: a cancel can never interleave
+                        # between the marker and the dispatch, so any cancel that
+                        # runs after this point sees the press as in flight.
+                        _cc2_pause_in_flight = True
+                        _cc2_pause_in_flight_at = time.time()
+                        _cc2_press_button("pause")
             if main_loop:
                 asyncio.run_coroutine_threadsafe(_cc2_heat(), main_loop)
             else:
                 log_event(f"[CC2-SLICER] main_loop not ready — heat queued in chamber_setpoint={target}°C", force_console=True)
         elif int(target) == 0:
+            # No-heat material (PETG & variants, PLA-CF): cancel pending async heat,
+            # release only our own preheat pause, then zero the target.
+            _cancel_cc2_preheat_zero_target()
             current_data["chamber_setpoint"] = 0.0
             current_data["slicer_soll"] = 0.0
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/soll", 0, retain=True)
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_soll", 0, retain=True)
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/slicer_target_temp", 0, retain=True)
             async def _cc2_off_no_heat():
-                try:
-                    await panda_send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "set_temp": 0}}))
-                except Exception as e:
-                    log_event(f"[CC2-OFF-ERR] {e}", force_console=True)
+                await _send_heater_off("No-heat material")
             if main_loop:
                 asyncio.run_coroutine_threadsafe(_cc2_off_no_heat(), main_loop)
             log_event(f"[CC2-SLICER] {val} needs no chamber heat — heater off", force_console=True)
@@ -676,7 +811,14 @@ def _handle_cc2_data(cc2_key, val):
 
 def _cc2_press_button(action: str) -> None:
     """Pause or resume the CC2 — via MQTT in direct mode, HA service call in HA mode."""
+    global _cc2_pause_in_flight, _cc2_pause_in_flight_at
     method = 1021 if action == "pause" else 1023
+    with _cc2_heat_lock:
+        if action == "pause":
+            _cc2_pause_in_flight = True
+            _cc2_pause_in_flight_at = time.time()
+        else:
+            _cc2_pause_in_flight = False
     if CC2_IP and CC2_SN:
         def _direct():
             client_id = f"pb{format(int(time.time() * 1000), 'x')[-8:]}"
@@ -744,6 +886,9 @@ def _cc2_press_button(action: str) -> None:
 
 
 def on_mqtt_message(client, userdata, msg):
+    global _dry_generation
+    if msg.topic.rsplit('/', 2)[-2:] in (["heat_stop", "set"], ["work_on", "set"], ["panda_power", "set"], ["drying", "set"], ["manual", "set"], ["auto", "set"]):
+        _dry_generation += 1
     # ✅ FIX: Alle globalen Deklarationen MÜSSEN am Anfang der Funktion stehen
     global current_data
     global last_ha_change
@@ -838,13 +983,13 @@ def on_mqtt_message(client, userdata, msg):
 
             if panda_ws and slicer_val > 0 and not power_forced_off:
                 asyncio.run_coroutine_threadsafe(
-                    panda_ws.send(json.dumps({
+                    panda_send_ordered(json.dumps({
                         "settings": {
                             "set_temp": int(slicer_val),
                             "work_on": 1,
                             "isrunning": 1
                         }
-                    })),
+                    }), _cc2_heat_generation),
                     main_loop
                 )
 
@@ -891,13 +1036,14 @@ def on_mqtt_message(client, userdata, msg):
             log_event("[CC2] Resuming CC2 before emergency stop", force_console=True)
 
         async def stop_flow():
-            if panda_ws:
-                try:
-                    await panda_ws.send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "work_mode": 0, "set_temp": 0}}))
-                except Exception as e:
-                    log_event(f"[EMERGENCY-STOP-ERR] WS send failed: {e} — physical heater may still run!", force_console=True)
-            else:
-                log_event("[EMERGENCY-STOP-WARN] Panda not connected — physical heater may still run!", force_console=True)
+            async with _get_panda_cmd_lock():
+                if panda_ws:
+                    try:
+                        await panda_ws.send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "work_mode": 0, "set_temp": 0}}))
+                    except Exception as e:
+                        log_event(f"[EMERGENCY-STOP-ERR] WS send failed: {e} — physical heater may still run!", force_console=True)
+                else:
+                    log_event("[EMERGENCY-STOP-WARN] Panda not connected — physical heater may still run!", force_console=True)
         
         asyncio.run_coroutine_threadsafe(stop_flow(), main_loop)
 
@@ -978,6 +1124,19 @@ def on_mqtt_message(client, userdata, msg):
 
     # --- DRY MODUS ---
     if msg.topic.endswith("/drying/set"):
+        full_dry = None
+        if msg.payload.decode().strip().startswith("{"):
+            try:
+                requested = json.loads(msg.payload.decode())
+                temp = requested["temperature_c"]
+                hours = requested["duration_hours"]
+                if type(temp) is not int or not 40 <= temp <= 60 or type(hours) is not int or not 1 <= hours <= 99:
+                    raise ValueError("Dry requires 40–60C and 1–99 whole hours")
+                full_dry = ({"isrunning": 0}, {"filament_temp": temp}, {"filament_timer": hours},
+                            {"filament_drying_mode": 3}, {"work_mode": 3}, {"work_on": True}, {"isrunning": 1})
+            except (ValueError, KeyError, TypeError) as exc:
+                log_event(f"[DRY-REJECTED] {exc}", force_console=True)
+                return
         log_event(">>> DRYER MODE ENTERED <<<", force_console=True)
 
         heating_locked = False
@@ -994,7 +1153,27 @@ def on_mqtt_message(client, userdata, msg):
             retain=True
         )
 
+        dry_generation = _dry_generation
         async def flow():
+            if full_dry is not None:
+                # V1.0.3's own UI writes custom settings in hours, selects custom,
+                # then starts. Do not combine fields or retry ambiguous delivery.
+                async with _get_panda_cmd_lock():
+                    if not panda_ws or not bind_confirmed:
+                        log_event("[DRY-REJECTED] No confirmed Panda connection", force_console=True)
+                        return
+                    try:
+                        for settings in full_dry:
+                            if dry_generation != _dry_generation or global_lock or power_forced_off or heating_locked:
+                                log_event("[DRY-CANCELLED] Superseded by another control command", force_console=True)
+                                return
+                            async with asyncio.timeout(_PANDA_SEND_TIMEOUT):
+                                await panda_ws.send(json.dumps({"settings": settings}))
+                        log_event(f"[DRY-SENT] Custom {temp}C for {hours} hours; awaiting device report", force_console=True)
+                        await asyncio.wait_for(panda_ws.send(json.dumps({"get_settings": 1})), _PANDA_SEND_TIMEOUT)
+                    except Exception as exc:
+                        log_event(f"[DRY-UNCONFIRMED] Delivery unknown; not retrying: {exc}", force_console=True)
+                return
             if panda_ws:
                 await panda_ws.send(json.dumps({
                     "settings": {
@@ -1012,16 +1191,17 @@ def on_mqtt_message(client, userdata, msg):
         payload = msg.payload.decode().strip().lower()
         is_on = payload in ("on", "1", "true")
         async def p_flow():
-            if panda_ws:
-                try:
-                    if not is_on:
-                        await panda_ws.send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "work_mode": 0}}))
-                    else:
-                        await panda_ws.send(json.dumps({"settings": {"work_on": 1, "isrunning": 1}}))
-                except Exception as e:
-                    log_event(f"[WORK-ON-ERR] WS send failed ({'ON' if is_on else 'OFF'}): {e}", force_console=True)
-            else:
-                log_event(f"[WORK-ON-WARN] Panda not connected — {'ON' if is_on else 'OFF'} command dropped, MQTT state updated only", force_console=True)
+            async with _get_panda_cmd_lock():
+                if panda_ws:
+                    try:
+                        if not is_on:
+                            await panda_ws.send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "work_mode": 0}}))
+                        else:
+                            await panda_ws.send(json.dumps({"settings": {"work_on": 1, "isrunning": 1}}))
+                    except Exception as e:
+                        log_event(f"[WORK-ON-ERR] WS send failed ({'ON' if is_on else 'OFF'}): {e}", force_console=True)
+                else:
+                    log_event(f"[WORK-ON-WARN] Panda not connected — {'ON' if is_on else 'OFF'} command dropped, MQTT state updated only", force_console=True)
         asyncio.run_coroutine_threadsafe(p_flow(), main_loop)
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/work_on", "1" if is_on else "0", retain=True)
         return
@@ -1055,21 +1235,22 @@ def on_mqtt_message(client, userdata, msg):
                 log_event("[CC2] Resuming CC2 before heater power off", force_console=True)
 
             async def hard_power_off():
-                try:
-                    if panda_ws:
-                        await panda_ws.send(json.dumps({"settings": {"isrunning": 0}}))
-                        await asyncio.sleep(0.2)
+                async with _get_panda_cmd_lock():
+                    try:
+                        if panda_ws:
+                            await panda_ws.send(json.dumps({"settings": {"isrunning": 0}}))
+                            await asyncio.sleep(0.2)
 
-                        await panda_ws.send(json.dumps({"settings": {"work_mode": 0}}))
-                        await asyncio.sleep(0.2)
+                            await panda_ws.send(json.dumps({"settings": {"work_mode": 0}}))
+                            await asyncio.sleep(0.2)
 
-                        await panda_ws.send(json.dumps({"settings": {"work_on": False}}))
-                        await asyncio.sleep(0.2)
-                        log_event("[POWER-OFF] Heater shutdown complete", force_console=True)
-                    else:
-                        log_event("[POWER-OFF-WARN] Panda not connected — shutdown command not sent", force_console=True)
-                except Exception as e:
-                    log_event(f"[POWER-OFF-ERR] {e}")
+                            await panda_ws.send(json.dumps({"settings": {"work_on": False}}))
+                            await asyncio.sleep(0.2)
+                            log_event("[POWER-OFF] Heater shutdown complete", force_console=True)
+                        else:
+                            log_event("[POWER-OFF-WARN] Panda not connected — shutdown command not sent", force_console=True)
+                    except Exception as e:
+                        log_event(f"[POWER-OFF-ERR] {e}")
 
             asyncio.run_coroutine_threadsafe(hard_power_off(), main_loop)
 
@@ -1312,8 +1493,12 @@ else:
 
 
 
-async def panda_send(payload: str) -> None:
-    """Send a JSON command to the Panda device via whichever path is active."""
+async def panda_send(payload: str):
+    """Send a JSON command to the Panda device via whichever path is active.
+
+    Returns False when there was no live link and the command was DROPPED (logged);
+    otherwise True once the transport accepted it. Existing callers ignore the value.
+    "Accepted" is not a device acknowledgement — the Panda protocol has none."""
     if panda_ws:
         await panda_ws.send(payload)
     elif panda_writer and not panda_writer.is_closing():
@@ -1326,6 +1511,129 @@ async def panda_send(payload: str) -> None:
         await panda_writer.drain()
     else:
         log_event(f"[PANDA-DISCONNECTED] No WS connection — command dropped: {payload[:120]}", force_console=True)
+        return False
+    return True
+
+
+# Heater commands (heat-on sequence and every heater-off) go through one asyncio
+# lock so their order on the Panda link is the order in which they acquire it,
+# independent of whether the transport yields before or after writing. (With the
+# pinned websockets 16 a text send writes to the transport synchronously before its
+# first suspension, so the wire order already equals the call order; the lock keeps
+# that true for any transport that suspends first.) A heat command carries the
+# generation it was scheduled under and re-checks it INSIDE the lock, so once a
+# zero-target cancel or a print end has bumped the generation no stale heat-on can
+# be sent after the off. The lock is held for one send only (never across the
+# sleeps) and each send is bounded so a hung link cannot wedge the off behind it.
+#
+# A bounded send that times out is NOT "not sent": the frame may already be on the
+# wire (writer path: written, drain still pending; websockets: written, flow
+# control still pending). There is no device ack, so the outcome is UNCONFIRMED and
+# callers must treat it as "possibly delivered" — never as a clean failure and never
+# as a success:
+#   * heat-on, generation still valid  -> assume the heater may be on and carry on
+#     to the preheat pause (the pause is what protects the print);
+#   * heat-on, generation superseded   -> nothing more is sent, the off follows;
+#   * heater-off                       -> heater state is unknown; remembered as
+#     pending and re-sent on the next Panda bind (_send_heater_off).
+_PANDA_SEND_TIMEOUT = 10.0
+_panda_cmd_lock = None
+
+class _OvershootSuperseded(Exception):
+    """Internal: the dynamic-overshoot set_temp was superseded by a cancel / print end."""
+
+class SendResult(enum.Enum):
+    SENT = "sent"                # transport accepted the frame (no device ack exists)
+    SKIPPED = "skipped"          # generation superseded inside the lock: provably not sent
+    UNCONFIRMED = "unconfirmed"  # timeout / error / no link: may or may not have landed
+
+def _get_panda_cmd_lock():
+    global _panda_cmd_lock
+    if _panda_cmd_lock is None:
+        _panda_cmd_lock = asyncio.Lock()   # first use is inside a coroutine on the main loop
+    return _panda_cmd_lock
+
+def _panda_dryer_owns_control():
+    """Only a bound device can establish Dry mode; its firmware owns the timer.
+
+    Never infer a cycle from retained MQTT settings. Master stop/lock still wins.
+    Even a completed Dry cycle must not be restarted by chamber automation.
+    """
+    return (bind_confirmed and last_ws_settings.get("work_mode") in (3, "3")
+            and not global_lock and not power_forced_off)
+
+
+async def panda_send_ordered(payload: str, generation=None) -> "SendResult":
+    """Serialised heater send. Never raises (except cancellation); see SendResult."""
+    async with _get_panda_cmd_lock():
+        if _panda_dryer_owns_control() and "settings" in json.loads(payload):
+            log_event("[DRY] Chamber command skipped: device controls drying", force_console=True)
+            return SendResult.SKIPPED
+        if generation is not None and generation != _cc2_heat_generation:
+            return SendResult.SKIPPED
+        try:
+            accepted = await asyncio.wait_for(panda_send(payload), _PANDA_SEND_TIMEOUT)
+        except Exception as e:
+            log_event(f"[PANDA-SEND-UNCONFIRMED] {type(e).__name__}: {e or 'timed out'} — "
+                      f"delivery unknown for {payload[:120]}", force_console=True)
+            return SendResult.UNCONFIRMED
+        return SendResult.UNCONFIRMED if accepted is False else SendResult.SENT
+
+_HEATER_OFF_PAYLOAD = json.dumps({"settings": {"isrunning": 0, "work_on": False, "set_temp": 0}})
+_PANDA_OFF_PENDING_MAX_AGE = 1800.0   # a pending off older than this is not replayed
+_panda_off_pending = False
+_panda_off_pending_at = 0.0
+
+async def _send_heater_off(context: str) -> bool:
+    """Send the heater-off. True only when the transport accepted it; otherwise the
+    off is remembered as pending (heater state UNKNOWN) and re-sent on the next bind."""
+    global _panda_off_pending, _panda_off_pending_at
+    result = await panda_send_ordered(_HEATER_OFF_PAYLOAD)
+    if result is SendResult.SENT or (result is SendResult.SKIPPED and _panda_dryer_owns_control()):
+        # A fresh Dry report supersedes an old print shutdown; never replay it later.
+        _panda_off_pending = False
+        return True
+    _panda_off_pending = True
+    _panda_off_pending_at = time.time()
+    log_event(f"[CC2-OFF-ERR] {context}: heater-off NOT confirmed delivered ({result.value}). "
+              "Heater state is UNKNOWN — will re-send on the next Panda connect; check the "
+              "chamber heater manually.", force_console=True)
+    return False
+
+async def _resend_pending_off() -> None:
+    """Called on Panda bind with no heat demand: replay an off that was never confirmed."""
+    global _panda_off_pending
+    if not _panda_off_pending:
+        return
+    if time.time() - _panda_off_pending_at > _PANDA_OFF_PENDING_MAX_AGE:
+        _panda_off_pending = False
+        log_event("[CC2-OFF-ERR] Unconfirmed heater-off is too old to replay — dropped; "
+                  "check the chamber heater manually.", force_console=True)
+        return
+    await _send_heater_off("Replay after reconnect")
+
+async def _cc2_send_heat_sequence(generation, preheat_temp) -> "SendResult":
+    """Shared heat-on sequence. SKIPPED = superseded (a stale sequence stops and sends
+    nothing more); UNCONFIRMED = some send may have landed (treat heat as possibly on);
+    SENT = every send accepted."""
+    global _panda_off_pending
+    worst = SendResult.SENT
+    steps = [
+        (json.dumps({"settings": {"isrunning": 0}}), 0.2),
+        (json.dumps({"settings": {"work_mode": 2, "work_on": True, "set_temp": preheat_temp, "isrunning": 1}}), 0.3),
+        (json.dumps({"get_settings": 1}), 0),
+    ]
+    for i, (payload, delay) in enumerate(steps):
+        result = await panda_send_ordered(payload, generation)
+        if result is SendResult.SKIPPED:
+            return SendResult.SKIPPED
+        if result is SendResult.UNCONFIRMED:
+            worst = SendResult.UNCONFIRMED
+        if i == 1:
+            _panda_off_pending = False   # a live heat demand supersedes an unconfirmed off
+        if delay:
+            await asyncio.sleep(delay)
+    return worst
 
 
 # --- WS LOOP (OPTIMIERT: Hält Verbindung bei WiFi-Paketen offen) ---
@@ -1336,7 +1644,7 @@ async def update_limits_from_ws():
     global last_stop_command_time, cc2_paused_for_preheat, _preheat_overshoot_temp
     global _cc2_dynamic_overshoot_active, _last_cc2_resume_attempt
     global _last_heat_status, _last_heat_log_time
-    global _ws_bind_time
+    global _ws_bind_time, _panda_off_pending
     uri = f"ws://{PANDA_IP}/ws"
 
     while True:
@@ -1346,15 +1654,16 @@ async def update_limits_from_ws():
 
             try:
                 async with websockets.connect(f"ws://{PANDA_IP}/ws", ping_interval=20, ping_timeout=None, close_timeout=1) as ws:
-                    await ws.send(json.dumps({
-                        "printer": {
-                            "ip": HOST_IP,
-                            "sn": PRINTER_SN,
-                            "access_code": ACCESS_CODE
-                        }
-                    }))
+                    if not CC2_ACTIVE:
+                        await ws.send(json.dumps({
+                            "printer": {
+                                "ip": HOST_IP,
+                                "sn": PRINTER_SN,
+                                "access_code": ACCESS_CODE
+                            }
+                        }))
 
-                    await asyncio.sleep(0.3)
+                        await asyncio.sleep(0.3)
 
                     # 2️⃣ HARD POWER OFF (MASTER SWITCH!)
                     await ws.send(json.dumps({
@@ -1381,8 +1690,9 @@ async def update_limits_from_ws():
                 log_event(f"[WS] Connected to Panda {PANDA_IP}")
                 panda_ws = websocket
 
-                # Nur binden wenn NICHT power_forced_off
-                if not power_forced_off:
+                # Only legacy emulation binds a printer. CC2 observes the device
+                # directly; rebinding its printer here is a configuration write.
+                if not CC2_ACTIVE and not power_forced_off:
 
                     await websocket.send(json.dumps({
                         "printer": {
@@ -1403,12 +1713,13 @@ async def update_limits_from_ws():
                     try:
                         msg = await asyncio.wait_for(websocket.recv(), timeout=10.0)
                     except asyncio.TimeoutError:
-                        # Device went quiet — poll for current settings so temperature
-                        # comparisons and heating logic keep running every ≤10s.
-                        try:
-                            await websocket.send(json.dumps({"get_settings": 1}))
-                        except Exception:
-                            pass
+                        # CC2 relies on the native push stream; get_settings is
+                        # not a supported status request on the inspected firmware.
+                        if not CC2_ACTIVE:
+                            try:
+                                await websocket.send(json.dumps({"get_settings": 1}))
+                            except Exception:
+                                pass
                         continue
                     data = json.loads(msg)
 
@@ -1417,6 +1728,18 @@ async def update_limits_from_ws():
 
                     # Nur verarbeiten wenn settings enthalten
                     if 'settings' in data:
+
+                        # Read current device mode BEFORE reconnect can issue commands.
+                        if not bind_confirmed:
+                            last_ws_settings.clear()
+                        last_ws_settings.update(data['settings'])
+                        if 'work_mode' not in last_ws_settings:
+                            # Temperature-only packets cannot establish control ownership.
+                            continue
+
+                        if data['settings'].get('work_mode') in (3, "3") and not global_lock and not power_forced_off:
+                            # A fresh Dry selection supersedes shutdowns belonging to an old print.
+                            _panda_off_pending = False
 
                         # ✅ Bind bestätigt
                         if not bind_confirmed:
@@ -1431,28 +1754,42 @@ async def update_limits_from_ws():
                             # Re-sync heating state after reconnect, but only if there is
                             # an active CC2 print. Stale retained MQTT chamber_setpoint from a
                             # previous session must not trigger heating when the printer is idle.
+                            # Capture the heat generation BEFORE reading the target: a PETG cancel
+                            # bumps it before it zeroes the target, so a positive target read after
+                            # an older capture is always detected as stale at send time.
+                            _reconnect_gen = _cc2_heat_generation
                             chamber_target = _cc2_real_chamber_target()
+                            if chamber_target <= 0:
+                                await _resend_pending_off()
                             _reconnect_printing = (not CC2_ACTIVE) or current_data.get("cc2_print_status", "idle") in {
                                 "printing", "preheating", "paused", "pausing", "resuming", "stopping"
                             }
-                            if chamber_target > 0 and not power_forced_off and not global_lock and _reconnect_printing:
+                            if chamber_target > 0 and not power_forced_off and not global_lock and _reconnect_printing and not _panda_dryer_owns_control():
                                 _reconnect_temp = (
                                     _preheat_overshoot_temp if (cc2_paused_for_preheat and _preheat_overshoot_temp > 0)
                                     else int(PANDA_MAX_TEMP) if (_cc2_dynamic_overshoot_active and CC2_ACTIVE)
                                     else int(chamber_target)
                                 )
                                 log_event(f"[WS-RECONNECT] Resuming heat to {_reconnect_temp}°C after WS reconnect{'  (dynamic overshoot)' if (_cc2_dynamic_overshoot_active and _reconnect_temp == int(PANDA_MAX_TEMP)) else '  (preheat overshoot)' if _reconnect_temp != int(chamber_target) else ''}", force_console=True)
-                                await websocket.send(json.dumps({
+                                # Generation-ordered send (shared lock): a cancel to zero can neither
+                                # be overtaken by this heat-on nor have it follow the off.
+                                _rc_result = await panda_send_ordered(json.dumps({
                                     "settings": {
                                         "work_mode": 2,
                                         "work_on": True,
                                         "set_temp": _reconnect_temp,
                                         "isrunning": 1
                                     }
-                                }))
-                                await asyncio.sleep(0.3)
-                                await websocket.send(json.dumps({"get_settings": 1}))
-                                global_heating_state = RELAY_ON
+                                }), _reconnect_gen)
+                                if _rc_result is SendResult.SKIPPED:
+                                    log_event("[WS-RECONNECT] Heat resume skipped — superseded by a zero-target cancel or print end", force_console=True)
+                                else:
+                                    await asyncio.sleep(0.3)
+                                    if not CC2_ACTIVE:
+                                        await panda_send_ordered(json.dumps({"get_settings": 1}))
+                                    with _cc2_heat_lock:
+                                        if _reconnect_gen == _cc2_heat_generation:
+                                            global_heating_state = RELAY_ON
 
                         incoming_settings = data['settings']
 
@@ -1464,6 +1801,12 @@ async def update_limits_from_ws():
                                 retain=True
                             )
 
+                        for device_key, topic in (("custom_temp", "dry_device_temp_c"),
+                                                  ("custom_timer", "dry_device_timer_hours"),
+                                                  ("remaining_seconds", "dry_remaining_seconds"),
+                                                  ("isrunning", "dry_device_running")):
+                            if device_key in incoming_settings:
+                                mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/{topic}", str(incoming_settings[device_key]), retain=True)
                         last_ws_settings.update(incoming_settings)
                         s = last_ws_settings
 
@@ -1484,6 +1827,7 @@ async def update_limits_from_ws():
                         # to accelerate heat soak. Once CC2 is within CC2_RESUME_OFFSET of target,
                         # drop PB back to real target then resume the print.
                         if cc2_paused_for_preheat:
+                            _drop_gen = _cc2_heat_generation  # before the target read (see reconnect)
                             _target = _cc2_real_chamber_target()
                             _pb_ist = float(current_data.get("chamber_temp", 0))
                             _cc2_ist_raw = float(current_data.get("cc2_chamber_temp", 0.0))
@@ -1500,26 +1844,37 @@ async def update_limits_from_ws():
                             if _target > 0 and _cc2_ready:
                                 _resume_reason = f"PB:{_pb_ist:.0f}°C CC2:{_cc2_ist_raw:.0f}°C (threshold {_target - CC2_RESUME_OFFSET:.0f}°C)"
                                 log_event(f"[CC2-SLICER] Chamber ready {_resume_reason} — dropping PB to {_target:.0f}°C and resuming", force_console=True)
-                                try:
-                                    await panda_send(json.dumps({
-                                        "settings": {"work_mode": 2, "work_on": True, "set_temp": int(_target), "isrunning": 1}
-                                    }))
-                                except Exception as _e:
-                                    log_event(f"[CC2-SLICER] Drop-to-target error: {_e}", force_console=True)
+                                # Generation-ordered send; an UNCONFIRMED send (timeout/link down) keeps the
+                                # old behaviour of carrying on to the resume logic.
+                                _drop_result = await panda_send_ordered(json.dumps({
+                                    "settings": {"work_mode": 2, "work_on": True, "set_temp": int(_target), "isrunning": 1}
+                                }), _drop_gen)
+                                if _drop_result is SendResult.UNCONFIRMED:
+                                    log_event("[CC2-SLICER] Drop-to-target delivery UNCONFIRMED — continuing with resume logic", force_console=True)
                                 _cc2_status_now = current_data.get("cc2_print_status", "")
-                                if _cc2_status_now in ("paused", "pausing", "preheating"):
-                                    _now = time.time()
-                                    if _now - _last_cc2_resume_attempt >= 15:
-                                        _last_cc2_resume_attempt = _now
-                                        _cc2_press_button("resume")
+                                with _cc2_heat_lock:
+                                    # The send awaited: a zero-target cancel / print end may have landed.
+                                    # It already cleared the preheat state and its rule is to never
+                                    # press resume, so a stale drop-to-target must not resume either.
+                                    # Check + resume press are atomic under the lock.
+                                    _drop_stale = _drop_result is SendResult.SKIPPED or _drop_gen != _cc2_heat_generation
+                                    if _drop_stale:
+                                        pass
+                                    elif _cc2_status_now in ("paused", "pausing", "preheating"):
+                                        _now = time.time()
+                                        if _now - _last_cc2_resume_attempt >= 15:
+                                            _last_cc2_resume_attempt = _now
+                                            _cc2_press_button("resume")
+                                        else:
+                                            log_event(f"[CC2-SLICER] Resume already attempted recently while CC2 status={_cc2_status_now!r} — waiting for confirmation", force_console=True)
+                                    elif _cc2_status_now in ("printing", "resuming"):
+                                        _clear_cc2_preheat_state()
+                                        log_event(f"[CC2-SLICER] Chamber ready, CC2 already {_cc2_status_now} — clearing preheat state", force_console=True)
                                     else:
-                                        log_event(f"[CC2-SLICER] Resume already attempted recently while CC2 status={_cc2_status_now!r} — waiting for confirmation", force_console=True)
-                                elif _cc2_status_now in ("printing", "resuming"):
-                                    _clear_cc2_preheat_state()
-                                    log_event(f"[CC2-SLICER] Chamber ready, CC2 already {_cc2_status_now} — clearing preheat state", force_console=True)
-                                else:
-                                    # Transient state (stopping, initializing, etc.) — keep flag, retry next cycle
-                                    log_event(f"[CC2-SLICER] Chamber ready but CC2 status={_cc2_status_now!r} — retrying next cycle", force_console=True)
+                                        # Transient state (stopping, initializing, etc.) — keep flag, retry next cycle
+                                        log_event(f"[CC2-SLICER] Chamber ready but CC2 status={_cc2_status_now!r} — retrying next cycle", force_console=True)
+                                if _drop_stale:
+                                    log_event("[CC2-SLICER] Drop-to-target superseded by a zero-target cancel or print end — not resuming", force_console=True)
 
                         # CC2 mode: bed_temp updated via MQTT subscription
                         # Traditional mode: fetch from HA REST API
@@ -1708,6 +2063,7 @@ async def update_limits_from_ws():
                                 retain=True
                             )
 
+                        _loop_gen = _cc2_heat_generation  # before the target read (see reconnect)
                         target = _cc2_real_chamber_target()
                         ist = float(current_data.get("chamber_temp", 0))
                         limit = float(current_data.get("bed_limit", 50))
@@ -1727,10 +2083,9 @@ async def update_limits_from_ws():
                             target_state, info = RELAY_OFF, "Standby"
 
                         elif work_mode_live == 3:
-                            if ist < (target - HYSTERESE):
-                                target_state, info = RELAY_ON, "Heating..."
-                            else:
-                                target_state, info = RELAY_OFF, "At Temperature"
+                            # Drying is controlled by the Panda's own timer and setpoint.
+                            target_state = RELAY_ON if panda_running and work_on_live in (1, True, "1") else RELAY_OFF
+                            info = "Drying" if target_state == RELAY_ON else "Dry idle"
 
                         elif work_mode_live == 1:
                             # CC2 mode: skip bed sensor check — device can't see CC2's Klipper,
@@ -1768,12 +2123,19 @@ async def update_limits_from_ws():
                                 if _cc2_dynamic_overshoot_active != _prev_overshoot and panda_ws:
                                     try:
                                         _new_st = int(PANDA_MAX_TEMP) if _cc2_dynamic_overshoot_active else int(target)
-                                        await panda_ws.send(json.dumps({"settings": {"set_temp": _new_st}}))
+                                        _os_result = await panda_send_ordered(json.dumps({"settings": {"set_temp": _new_st}}), _loop_gen)
+                                        if _os_result is SendResult.SKIPPED:
+                                            log_event("[CC2-OVERSHOOT] set_temp update skipped — superseded by a zero-target cancel or print end", force_console=True)
+                                            raise _OvershootSuperseded()
+                                        if _os_result is SendResult.UNCONFIRMED:
+                                            raise RuntimeError("delivery unconfirmed")
                                         log_event(
                                             f"[CC2-OVERSHOOT-{'ON' if _cc2_dynamic_overshoot_active else 'OFF'}] "
                                             f"CC2:{_cc2_now:.0f}°C target:{target:.0f}°C Δ{_cc2_delta:.0f}°C → set_temp {_new_st}°C",
                                             force_console=True
                                         )
+                                    except _OvershootSuperseded:
+                                        pass
                                     except Exception as _oe:
                                         log_event(f"[CC2-OVERSHOOT-ERR] set_temp update failed: {_oe}", force_console=True)
                                 if _cc2_now > 5.0 and _cc2_delta > CC2_OVERSHOOT_MIN_DELTA:
@@ -1791,7 +2153,10 @@ async def update_limits_from_ws():
 
                         time_passed = (time.time() - last_switch_time)
 
-                        if target_state == RELAY_OFF:
+                        if work_mode_live == 3 and not global_lock and not power_forced_off:
+                            # Do not let chamber automation override an active dryer.
+                            global_heating_state = target_state
+                        elif target_state == RELAY_OFF:
                             now_stop = time.time()
 
                             # V1.0.3 / Klipper bind:
@@ -1852,11 +2217,18 @@ async def update_limits_from_ws():
                                     }
                                     if CC2_ACTIVE:
                                         heat_cmd["work_mode"] = 2
-                                    await panda_ws.send(json.dumps({"settings": heat_cmd}))
-                                    # Poll immediately so device confirms isrunning=1 and
-                                    # heating flips to ON within ~0.5s instead of ~10s.
-                                    await asyncio.sleep(0.3)
-                                    await panda_ws.send(json.dumps({"get_settings": 1}))
+                                    _on_result = await panda_send_ordered(json.dumps({"settings": heat_cmd}), _loop_gen)
+                                    if _on_result is SendResult.SKIPPED:
+                                        log_event("[AUTO-ON] Heat-on skipped — superseded by a zero-target cancel or print end", force_console=True)
+                                        global_heating_state = RELAY_OFF
+                                    elif _on_result is SendResult.UNCONFIRMED:
+                                        raise RuntimeError("heat-on delivery unconfirmed")
+                                    else:
+                                        # Poll immediately so device confirms isrunning=1 and
+                                        # heating flips to ON within ~0.5s instead of ~10s.
+                                        await asyncio.sleep(0.3)
+                                        if not CC2_ACTIVE:
+                                            await panda_send_ordered(json.dumps({"get_settings": 1}))
                                 except Exception as e:
                                     log_event(f"[AUTO-ON-ERR] target={int(target)}°C chamber={ist:.1f}°C: {e}", force_console=True)
                                     global_heating_state = RELAY_OFF  # Reset so next cycle retries
@@ -1976,6 +2348,7 @@ async def update_limits_from_ws():
                 log_event(f"[WS] Connection error ({PANDA_IP}): {err}", force_console=True)
 
             panda_ws = None
+            last_ws_settings.clear()
             bind_confirmed = False  # Force work_mode=2 re-sync on next connect
             global_heating_state = RELAY_OFF  # Clear stale state so HA doesn't show Heat=ON while offline
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/heating", "OFF", retain=True)
@@ -2433,6 +2806,18 @@ async def ha_cc2_poller():
                     except Exception as _fe:
                         log_event(f"[CC2-HA] Filament color cross-ref error: {_fe}", force_console=True)
 
+                # 1c. Mark unresolved so a stale buffered material from an earlier
+                # job cannot suppress the unknown-material fallback on print start.
+                # Also when the colour entity was never discovered, but only if this
+                # poller is the sole material source: with CC2_IP set MQTT also delivers
+                # active_filament_type, and a missing HA entity says nothing about it.
+                if (
+                    "_filename_chamber_temp" not in results
+                    and "active_filament_type" not in results
+                    and ("_active_filament_color" in _ha_cc2_entities or not CC2_IP)
+                ):
+                    results["_filament_unresolved"] = True
+
                 # ── Step 2: fetch status/sensor entities ─────────────────────────
                 for key, eid in _ha_cc2_entities.items():
                     if key.startswith("_") or key not in KEY_TRANSFORMS or key == "active_filament_type":
@@ -2462,6 +2847,15 @@ async def ha_cc2_poller():
                 return results
 
             raw = await loop.run_in_executor(None, fetch_all)
+            _unresolved = raw.pop("_filament_unresolved", False)
+            # Not on the poll that reports the job already running: the previous poll's
+            # fresh reading is the best evidence for this job, and one glitching read
+            # must not turn it into the unknown-material fallback. Stale material from
+            # the previous job is dropped by the idle polls before the job starts.
+            if _unresolved and raw.get("print_status", "").lower() not in {
+                "printing", "preheating", "paused", "pausing", "resuming", "stopping"
+            }:
+                _mark_cc2_filament_unresolved()
             # Apply filename-encoded chamber temp (priority 1) before status processing
             _fn_temp = raw.pop("_filename_chamber_temp", None)
             if _fn_temp and _fn_temp != current_data.get("chamber_setpoint", 0):
