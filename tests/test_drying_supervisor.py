@@ -513,3 +513,58 @@ def test_malformed_state_with_an_unusable_logger_still_inhibits(tmp_path):
             await tick(sup2, tr)
         assert tr.recover_calls == []
     asyncio.run(scenario())
+
+
+def test_cancel_remains_durable_after_older_save_finishes(tmp_path, monkeypatch):
+    """An older serialized RUNNING record must not replace a saved Stop."""
+    import threading
+
+    path = tmp_path / "session.json"
+    supervisor = DryingSupervisor(path)
+    assert supervisor.arm(50, 8)
+    replace_waiting = threading.Event()
+    release_old_save = threading.Event()
+    cancel_finished = threading.Event()
+    real_replace = os.replace
+    failures = []
+
+    def held_replace(src, dst):
+        if threading.current_thread().name == "older-save":
+            replace_waiting.set()
+            if not release_old_save.wait(3):
+                raise RuntimeError("test did not release old save")
+        return real_replace(src, dst)
+
+    def old_save():
+        try:
+            supervisor._save()
+        except Exception as exc:
+            failures.append(exc)
+
+    def cancel():
+        try:
+            assert supervisor.cancel()
+        except Exception as exc:
+            failures.append(exc)
+        finally:
+            cancel_finished.set()
+
+    monkeypatch.setattr(os, "replace", held_replace)
+    writer = threading.Thread(target=old_save, name="older-save")
+    stopper = threading.Thread(target=cancel, name="stopper")
+    writer.start()
+    assert replace_waiting.wait(3)
+    stopper.start()
+    try:
+        # Without synchronization cancellation finishes first, then the old
+        # RUNNING file replaces it. With synchronization Stop waits its turn.
+        cancel_finished.wait(1)
+    finally:
+        release_old_save.set()
+        writer.join(3)
+        stopper.join(3)
+    assert not writer.is_alive() and not stopper.is_alive()
+    assert not failures
+    restored = DryingSupervisor(path).status()
+    assert restored["status"] == "cancelled"
+    assert restored["pending_stop"] is True

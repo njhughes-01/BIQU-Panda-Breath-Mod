@@ -42,6 +42,7 @@ import asyncio
 import json
 import os
 import tempfile
+import threading
 import time
 import uuid
 import weakref
@@ -96,6 +97,9 @@ class DryingSupervisor:
         self._monotonic = monotonic
         self._log = _safe_logger(logger)
         self._lock = asyncio.Lock()
+        # MQTT cancellation and asyncio saves share this lock through replace,
+        # so an older RUNNING write cannot land after a durable cancellation.
+        self._state_lock = threading.RLock()
         self._state: Optional[dict] = None   # the one persisted session record
         self._persist_error = False
         # runtime-only recovery bookkeeping (fresh per process by design)
@@ -174,6 +178,10 @@ class DryingSupervisor:
         return True
 
     def _save(self) -> bool:
+        with self._state_lock:
+            return self._save_locked()
+
+    def _save_locked(self) -> bool:
         """Atomic write: temp file in the target directory, then replace."""
         if self._state is None:
             return True
@@ -202,6 +210,10 @@ class DryingSupervisor:
 
     # ── public API ───────────────────────────────────────────────────────────
     def arm(self, temp_c, hours) -> bool:
+        with self._state_lock:
+            return self._arm_locked(temp_c, hours)
+
+    def _arm_locked(self, temp_c, hours) -> bool:
         """Persist an explicit supervised session before returning.
 
         Rejects invalid parameters and any second start while a session is
@@ -252,6 +264,10 @@ class DryingSupervisor:
         return True
 
     def cancel(self) -> bool:
+        with self._state_lock:
+            return self._cancel_locked()
+
+    def _cancel_locked(self) -> bool:
         """Persist cancellation + pending stop before returning. True if persisted.
 
         The in-memory cancellation lands regardless, so an in-flight recovery
