@@ -2390,3 +2390,11 @@ def test_mqtt_global_lock_still_consumes_device_telemetry(tmp_path):
         asyncio.run(run())
     assert ft.recv_calls >= 3
     assert ft.sent == []
+
+
+@pytest.mark.parametrize("saved", ["not json", json.dumps({"written_at": 0})])
+def test_startup_handles_invalid_or_stale_preheat_state(saved):
+    state_file = current_state_dir() / "preheat_state.json"
+    state_file.write_text(saved)
+    mod, _ = load_panda()
+    assert mod.cc2_paused_for_preheat is False

@@ -371,8 +371,6 @@ def _load_preheat_state():
     except Exception as _e:
         log_event(f"[PREHEAT-STATE] Load failed: {_e}")
 
-_load_preheat_state()
-
 def _clear_cc2_preheat_state():
     global cc2_paused_for_preheat, _preheat_overshoot_temp
     global _cc2_pause_in_flight, _cc2_heat_claim_gen
@@ -507,6 +505,9 @@ def log_event(msg, force_console=False):
             )
     except Exception:
         pass
+
+# Load persisted state only after its error/stale-state logger exists.
+_load_preheat_state()
 
 # Supervised drying session owner (openspec/changes/supervised-drying): built
 # here, after log_event is defined, for exactly the reason noted above.
