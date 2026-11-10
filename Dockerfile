@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir -r requirements-backend.txt
 COPY . .
 
 RUN adduser --disabled-password --gecos "" appuser \
-    && mkdir -p /app/certs \
+    && mkdir -p /app/certs /app/dry_state \
     && chown -R appuser /app \
     && chmod +x /app/docker-entrypoint.sh
 USER appuser
