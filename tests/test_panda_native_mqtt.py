@@ -1179,3 +1179,236 @@ def test_live_readback_cannot_override_offline_or_cancel(interrupt, at_field):
             assert not any("drying_running" in json.loads(p) for _, p, _ in client.published)
         await stop_transport(tr)
     asyncio.run(scenario())
+
+
+# ═══════════════════ supervised recovery (openspec: supervised-drying) ═══════
+# The supervisor (drying_supervisor.py) is the only caller of these seams:
+# drying_snapshot / recover_drying / stop_supervised. The ordinary
+# start_drying active-cycle guard must remain for every other caller.
+
+def recovery_state(**over):
+    """Idle supervised-drying device: drying OFF while stale positive remaining."""
+    s = full_state(mode="filament drying", work_on="ON", drying_running="OFF",
+                   custom_temp=50, custom_timer=8, drying_remaining_min=90)
+    s.update(over)
+    return s
+
+
+def recovery_responder(client, state):
+    """Device echoes every config field; the timer only counts when ON."""
+    def respond(topic, payload, kw):
+        obj = json.loads(payload)
+        (k, v), = obj.items()
+        if k in state and isinstance(state[k], (int, float)) and not isinstance(state[k], bool):
+            state[k] = int(v) if str(v).lstrip("-").isdigit() else float(v)
+        else:
+            state[k] = v
+        if k == "drying_running" and v == "ON":
+            state["drying_remaining_min"] = int(state["custom_timer"]) * 60
+        client.fire_state(dict(state))
+    return respond
+
+
+def attach(client, respond):
+    original = client.publish
+
+    def publish(topic, payload=None, qos=0, retain=False):
+        r = original(topic, payload, qos, retain)
+        if topic == CMD:
+            respond(topic, payload, {"qos": qos, "retain": retain})
+        return r
+    client.publish = publish
+
+
+async def advance_clock_during(coro, clock, step=1.0):
+    adv_done = asyncio.Event()
+
+    async def advance():
+        while not adv_done.is_set():
+            await asyncio.sleep(0.005)
+            clock.advance(step)
+    adv = asyncio.ensure_future(advance())
+    try:
+        return await asyncio.wait_for(coro, 8)
+    finally:
+        adv_done.set()
+        await asyncio.gather(adv, return_exceptions=True)
+
+
+def test_drying_snapshot_exposes_fresh_state_with_sequence_and_copy():
+    async def scenario():
+        tr, client, clock = await connected_transport()
+        snap = tr.drying_snapshot()
+        assert snap is not None
+        seq, native = snap
+        assert isinstance(seq, int) and seq >= 1
+        assert native["chamber_temp"] == 24.5
+        native["chamber_temp"] = 99.0              # caller copy must not leak back
+        assert tr.drying_snapshot()[1]["chamber_temp"] == 24.5
+        client.fire_state(full_state(chamber_temp=25.0))
+        await asyncio.sleep(0)
+        assert tr.drying_snapshot()[0] > seq       # new live packet: new sequence id
+        clock.advance(10.1)                        # stale: no control input allowed
+        assert tr.drying_snapshot() is None
+        client.fire_state(full_state())
+        await asyncio.sleep(0)
+        assert tr.drying_snapshot() is not None
+        client.fire_disconnect()
+        await asyncio.sleep(0)
+        assert tr.drying_snapshot() is None        # reconnect alone never restores
+        await stop_transport(tr)
+    asyncio.run(scenario())
+
+
+def test_recover_drying_accepts_idle_off_positive_remaining_and_rounds_hours_up():
+    async def scenario():
+        wall = FakeClock()
+        tr, client, clock = await connected_transport(wall_clock=wall)
+        client.fire_state(recovery_state())
+        await asyncio.sleep(0)
+        # The ordinary start guard stays: positive remaining blocks a plain start.
+        assert await tr.start_drying(50, 8, lambda: False) is False
+        assert not [p for p in client.published if p[0] == CMD]
+        assert tr.start_status == "failed"
+        state = recovery_state()
+        attach(client, recovery_responder(client, state))
+        # 2.25h left: native whole-hour timer must round UP to 3
+        res = await tr.recover_drying(50, wall.t + 2.25 * 3600, lambda: False)
+        assert res == "confirmed"
+        keys = [json.loads(p).__iter__().__next__() for t, p, _ in client.published]
+        assert keys == ["custom_temp", "custom_timer", "filament_drying_mode",
+                        "mode", "work_on", "drying_running"]
+        f = cmd_fields(client)
+        assert f["custom_temp"] == 50 and f["custom_timer"] == 3
+        assert f["mode"] == "filament drying" and f["work_on"] == "ON"
+        starts = [p for t, p, _ in client.published if "drying_running" in p]
+        assert starts == ['{"drying_running": "ON"}']
+        assert tr.start_status == "confirmed"
+        await stop_transport(tr)
+    asyncio.run(scenario())
+
+
+def test_recover_drying_refuses_running_stale_and_expired_before_writing():
+    async def scenario():
+        wall = FakeClock()
+        tr, client, clock = await connected_transport(wall_clock=wall)
+        # running timer (drying_running ON): never rewrite it
+        client.fire_state(recovery_state(drying_running="ON", drying_remaining_min=40))
+        await asyncio.sleep(0)
+        assert await tr.recover_drying(50, wall.t + 3600, lambda: False) == "failed"
+        assert not [p for p in client.published if p[0] == CMD]
+        # stale telemetry: no confirmation basis, no write
+        clock.advance(10.1)
+        assert await tr.recover_drying(50, wall.t + 3600, lambda: False) == "failed"
+        assert not [p for p in client.published if p[0] == CMD]
+        # deadline already passed: never start what cannot finish
+        client.fire_state(recovery_state())
+        await asyncio.sleep(0)
+        assert await tr.recover_drying(50, wall.t - 1.0, lambda: False) == "failed"
+        assert not [p for p in client.published if p[0] == CMD]
+        await stop_transport(tr)
+    asyncio.run(scenario())
+
+
+def test_recover_drying_aborts_before_final_on_when_deadline_passes():
+    async def scenario():
+        wall = FakeClock()
+        tr, client, clock = await connected_transport(wall_clock=wall)
+        client.fire_state(recovery_state())
+        await asyncio.sleep(0)
+        state = recovery_state()
+
+        def respond(topic, payload, kw):          # device slow: wall time burns
+            recovery_responder(client, state)(topic, payload, kw)
+            wall.advance(7200.0)
+        attach(client, respond)
+        res = await tr.recover_drying(50, wall.t + 3600, lambda: False)
+        assert res == "failed"
+        assert not [p for p in client.published if "drying_running" in p]
+        assert tr.start_status == "failed"
+        await stop_transport(tr)
+    asyncio.run(scenario())
+
+
+def test_recover_drying_uncertain_start_is_never_blind_retried():
+    async def scenario():
+        wall = FakeClock()
+        tr, client, clock = await connected_transport(wall_clock=wall)
+        client.fire_state(recovery_state())
+        await asyncio.sleep(0)
+
+        # device echoes config but never reports the timer running
+        state = recovery_state()
+
+        def respond2(topic, payload, kw):
+            obj = json.loads(payload)
+            (k, v), = obj.items()
+            if k in state and isinstance(state[k], (int, float)) and not isinstance(state[k], bool):
+                state[k] = int(v) if str(v).lstrip("-").isdigit() else float(v)
+            else:
+                state[k] = v
+            state["drying_running"] = "OFF"
+            state["drying_remaining_min"] = 0
+            client.fire_state(dict(state))
+        attach(client, respond2)
+        res = await advance_clock_during(
+            tr.recover_drying(50, wall.t + 8 * 3600, lambda: False), clock)
+        assert res == "uncertain"
+        assert tr.start_status == "uncertain"
+        starts = [p for t, p, _ in client.published if "drying_running" in p]
+        assert starts == ['{"drying_running": "ON"}']    # exactly once, no retry
+        # an unresolved uncertain outcome: refused again without new publishes
+        assert await tr.recover_drying(50, wall.t + 8 * 3600, lambda: False) == "uncertain"
+        assert [p for t, p, _ in client.published if "drying_running" in p] == starts
+        await stop_transport(tr)
+    asyncio.run(scenario())
+
+
+def test_recover_drying_stop_generation_wins_before_final_on():
+    async def scenario():
+        wall = FakeClock()
+        tr, client, clock = await connected_transport(wall_clock=wall)
+        client.fire_state(recovery_state())
+        await asyncio.sleep(0)
+        # device never echoes config: recovery waits in readback, stop must overtake
+        task = asyncio.ensure_future(asyncio.wait_for(
+            tr.recover_drying(50, wall.t + 3600, lambda: False), 8))
+        await asyncio.sleep(0.05)
+        ok = await asyncio.wait_for(
+            tr.send(json.dumps({"settings": {"work_on": False, "work_mode": 0}})), 1)
+        assert ok is True, "stop blocked behind the recovery wait"
+        assert await task == "failed"
+        assert not [p for t, p, _ in client.published if "drying_running" in p]
+        await stop_transport(tr)
+    asyncio.run(scenario())
+
+
+def test_stop_supervised_reports_confirmed_only_from_fresh_off_readback():
+    async def scenario():
+        # confirmed path: device answers OFF and fresh telemetry confirms
+        tr, client, clock = await connected_transport()
+
+        def respond_off(topic, payload=None, qos=0, retain=False):
+            client.published.append((topic, payload, {"qos": qos, "retain": retain}))
+            if topic == CMD:
+                client.fire_state(full_state(work_on="OFF", drying_running="OFF"))
+            return FakePublish(0)
+        client.publish = respond_off
+        assert await tr.stop_supervised() == "confirmed"
+        f = cmd_fields(client)
+        assert f.get("work_on") == "OFF" and f.get("drying_running") == "OFF"
+        await stop_transport(tr)
+        # unconfirmed: device never answers — pending stop stays owed
+        tr, client, clock = await connected_transport()
+        client.fire_state(recovery_state(drying_running="ON", drying_remaining_min=30))
+        await asyncio.sleep(0)
+        res = await advance_clock_during(tr.stop_supervised(), clock)
+        assert res == "uncertain"
+        await stop_transport(tr)
+        # broker offline: never a fake confirmation
+        tr, client, clock = await connected_transport()
+        client.fire_disconnect()
+        await asyncio.sleep(0)
+        assert await tr.stop_supervised() == "uncertain"
+        await stop_transport(tr)
+    asyncio.run(scenario())

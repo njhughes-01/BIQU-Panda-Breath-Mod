@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from collections import deque
 from typing import Callable, Deque, Optional, Tuple
@@ -110,6 +111,7 @@ class NativePandaTransport:
     def __init__(self, host, port, username, password, device_id, *,
                  client_factory: Optional[Callable[[], object]] = None,
                  clock: Callable[[], float] = time.monotonic,
+                 wall_clock: Optional[Callable[[], float]] = None,
                  logger: Optional[Callable[[str], None]] = None):
         if not host or not str(host).strip():
             raise ValueError("device MQTT host is required")
@@ -122,6 +124,9 @@ class NativePandaTransport:
         self.device_id = str(device_id).strip()
         self._client_factory = client_factory
         self._clock = clock
+        # Wall clock only for supervised-session deadline math; freshness and
+        # all device-wait deadlines stay on the monotonic ``clock``.
+        self._wall_clock = wall_clock or time.time
         self._log = logger or (lambda _m: None)
 
         self.topic_state = f"panda_breath/{self.device_id}/{TOPIC_STATE_SUFFIX}"
@@ -344,6 +349,18 @@ class NativePandaTransport:
         if self._last_live_ts is None:
             return None
         return self._clock() - self._last_live_ts
+
+    def drying_snapshot(self):
+        """``(sequence, copy-of-fresh-native-state)`` or None.
+
+        Fresh means live-only: non-retained packets from the pinned device,
+        within the window, on a connected+online broker. The sequence id
+        increases with every live packet, so a caller can count two DISTINCT
+        fresh snapshots; a copy keeps the transport state read-only outside.
+        """
+        if not self.available or self._latest is None:
+            return None
+        return self._seq, dict(self._latest[2])
 
     def _latest_native(self) -> Optional[dict]:
         return self._latest[2] if self._latest else None
@@ -845,3 +862,159 @@ class NativePandaTransport:
             if self._clock() >= deadline:
                 return False
             await self._tick()
+
+    # ── supervised drying recovery (drying_supervisor is the only caller) ──
+    def _recovery_hours(self, deadline: float) -> Optional[int]:
+        """Whole hours remaining until the fixed wall deadline, rounded UP
+        (native custom_timer is whole hours; the host still requests Stop at
+        the exact deadline). None when the deadline has already passed."""
+        remaining = deadline - self._wall_clock()
+        if remaining <= 0:
+            return None
+        return max(DRY_HOURS_MIN, min(DRY_HOURS_MAX, math.ceil(remaining / 3600.0)))
+
+    async def recover_drying(self, temp_c: int, deadline: float,
+                             cancelled: Callable[[], bool]) -> str:
+        """Supervisor-only recovery start for an armed supervised session.
+
+        Like ``start_drying`` (same per-field readback, serialization, stop
+        generation and uncertainty latch) but it deliberately accepts the idle
+        supervised case: drying_running OFF even with a stale positive
+        drying_remaining_min. It never rewrites a timer that is still running,
+        and the ordinary ``start_drying`` active-cycle guard is untouched for
+        every other caller. Returns "confirmed" | "uncertain" | "failed" —
+        an uncertain ON is never replayed; fresh telemetry must resolve it.
+        """
+        stop_generation = self._stop_generation
+        caller_cancelled = cancelled
+        cancelled = lambda: caller_cancelled() or self._stop_generation != stop_generation
+        if not _is_finite_number(deadline):
+            self.start_status = "failed"
+            self._log("[NATIVE-DRY] recovery refused: invalid deadline")
+            return "failed"
+        if self._latch_seq is not None:
+            self.start_status = "uncertain"
+            self._log("[NATIVE-DRY] recovery refused: earlier start unresolved — "
+                      "waiting on fresh telemetry, never blind-retrying")
+            return "uncertain"
+        if self._start_op_busy:
+            self.start_status = "failed"
+            self._log("[NATIVE-DRY] recovery refused: another start in flight")
+            return "failed"
+        self.start_status = None
+        if isinstance(temp_c, bool) or not isinstance(temp_c, int) \
+                or not DRY_TEMP_MIN <= temp_c <= DRY_TEMP_MAX:
+            self.start_status = "failed"
+            self._log(f"[NATIVE-DRY] recovery rejected {temp_c!r}C: out of range")
+            return "failed"
+        if not self._broker_connected:
+            self.start_status = "failed"
+            return "failed"
+        latest = self._latest_native()
+        if not self.available or latest is None:
+            self.start_status = "failed"
+            self._log("[NATIVE-DRY] recovery refused: no fresh live device state")
+            return "failed"
+        if _strict_on_off(latest.get("drying_running")):
+            self.start_status = "failed"
+            self._log("[NATIVE-DRY] recovery refused: device reports drying running — "
+                      "an already-running timer is never rewritten")
+            return "failed"
+        if cancelled():
+            self.start_status = "failed"
+            return "failed"
+        hours0 = self._recovery_hours(deadline)
+        if hours0 is None:
+            self.start_status = "failed"
+            self._log("[NATIVE-DRY] recovery refused: deadline already passed")
+            return "failed"
+        self.start_status = "confirming"
+
+        steps = [("custom_temp", str(temp_c)), ("custom_timer", str(hours0)),
+                 ("filament_drying_mode", "custom"), ("mode", "filament drying"),
+                 ("work_on", "ON")]
+        self._start_op_busy = True
+        try:
+            steps_ok = await self._run_start_steps(steps, cancelled)
+        finally:
+            self._start_op_busy = False
+        if not steps_ok:
+            self.start_status = "failed"
+            return "failed"
+        if self._latch_seq is not None or self._start_op_busy:
+            self.start_status = "failed"
+            self._log("[NATIVE-DRY] recovery aborted before timer ON: "
+                      "another start is active")
+            return "failed"
+
+        # Near the final ON: recompute the remaining hours on the wall clock,
+        # abort when the deadline passed while configuring, and only update the
+        # timer when the whole-hour value actually changed.
+        pre_start_temp = float(self._latest[2].get("chamber_temp", 0.0))
+        if cancelled() or not self.available:
+            self.start_status = "failed"
+            return "failed"
+        hours = self._recovery_hours(deadline)
+        if hours is None:
+            self.start_status = "failed"
+            self._log("[NATIVE-DRY] recovery aborted before timer ON: deadline passed")
+            return "failed"
+        if hours != hours0:
+            point = self._seq
+            if not await self._publish_one("custom_timer", str(hours)):
+                self.start_status = "failed"
+                return "failed"
+            ok = await self._wait_field("custom_timer", str(hours), after_seq=point,
+                                        timeout=CONFIG_READBACK_S, cancelled=cancelled)
+            if not ok:
+                self.start_status = "failed"
+                self._log("[NATIVE-DRY] recovery timer update not confirmed by device")
+                return "failed"
+            if cancelled() or self._recovery_hours(deadline) is None:
+                self.start_status = "failed"
+                return "failed"
+
+        point = self._seq
+        self._arm_uncertain(point)
+        self._start_op_busy = True
+        try:
+            if cancelled():
+                # Nothing was published after arming: a clean abort stays retryable.
+                self._latch_seq = None
+                self.start_status = "failed"
+                return "failed"
+            if not await self._publish_one("drying_running", "ON"):
+                # Publish failed after arming: stay uncertain until telemetry says otherwise
+                self.start_status = "uncertain"
+                self._latch_seq = self._seq
+                return "uncertain"
+            ok = await self._wait_start_confirmed(after_seq=point, hours=hours,
+                                                  timeout=START_READBACK_S,
+                                                  cancelled=cancelled)
+        finally:
+            self._start_op_busy = False
+        if not ok:
+            self.start_status = "uncertain"
+            self._latch_seq = self._seq
+            self._log("[NATIVE-DRY] recovery start UNCONFIRMED — no retry; "
+                      "waiting on fresh telemetry")
+            return "uncertain"
+        self.start_status = "confirmed"
+        self._latch_seq = None
+        if pre_start_temp >= float(temp_c):
+            self.heating_status = "at_target"
+        else:
+            self.heating_status = "pending"
+            self._start_heat_watch(pre_start_temp, float(temp_c))
+        return "confirmed"
+
+    async def stop_supervised(self) -> str:
+        """Supervisor-only Stop for cancellation/expiry (existing stop path).
+
+        Confirmation comes only from post-write fresh device telemetry, exactly
+        like ``emergency_stop``. An unconfirmed stop returns "uncertain" and
+        leaves the caller's pending-stop obligation standing — never claim a
+        stop succeeded, and never restart the device to resolve it."""
+        if await self.emergency_stop():
+            return "confirmed"
+        return "uncertain"
