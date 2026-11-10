@@ -264,6 +264,7 @@ def test_expiry_while_offline_persists_pending_stop_then_delivers_it(tmp_path):
         clock.advance(3601.0)                      # expiry during the outage
         tr.drop()
         await sup.tick(tr, lambda: False)          # offline: obligation persisted
+        await sup.tick(None, lambda: False)        # no transport object either
         saved = persisted(tmp_path)
         assert saved["status"] == "completed" and saved["pending_stop"] is True
         assert tr.stop_calls == 0

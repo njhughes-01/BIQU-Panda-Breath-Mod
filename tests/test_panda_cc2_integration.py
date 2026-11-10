@@ -1705,7 +1705,7 @@ SNAPSHOT = {"settings": {
 class _FakeNativeTransport:
     """Stands in for panda_native_mqtt.NativePandaTransport in Panda.py tests."""
 
-    def __init__(self, snapshots=None, raise_on_recv=None):
+    def __init__(self, snapshots=None, raise_on_recv=None, dry_running=False):
         self.sent, self.starts = [], []          # send() payloads / start_drying calls
         self.emergency_calls = 0
         self.emergency_result = True
@@ -1718,6 +1718,13 @@ class _FakeNativeTransport:
         self._q = [json.dumps(s) for s in (snapshots if snapshots is not None else [SNAPSHOT])]
         self._last = self._q[0] if self._q else json.dumps(SNAPSHOT)
         self._raise = raise_on_recv
+        # supervised-drying seam (drying_supervisor's only transport surface)
+        self.dry_running = dry_running
+        self._dry_seq = 0
+        self.recovers = []                        # recover_drying (temp_c, deadline)
+        self.recover_result = "confirmed"
+        self.stops = 0                            # stop_supervised calls
+        self.stop_result = "confirmed"
 
     async def __aenter__(self):
         self.entered += 1
@@ -1746,6 +1753,24 @@ class _FakeNativeTransport:
     async def start_drying(self, temperature_c, duration_hours, cancelled=None):
         self.starts.append((temperature_c, duration_hours, cancelled))
         return True
+
+    def drying_snapshot(self):
+        """Fresh live native state with a distinct sequence id per call."""
+        self._dry_seq += 1
+        return self._dry_seq, {
+            "mode": "filament drying", "work_on": "ON", "chamber_temp": 25.0,
+            "drying_running": "ON" if self.dry_running else "OFF",
+            "custom_temp": 50, "custom_timer": 8,
+            "drying_remaining_min": 60 if self.dry_running else 0,
+        }
+
+    async def recover_drying(self, temp_c, deadline, cancelled=None):
+        self.recovers.append((temp_c, deadline))
+        return self.recover_result
+
+    async def stop_supervised(self):
+        self.stops += 1
+        return self.stop_result
 
     async def emergency_stop(self):
         self.emergency_calls += 1
@@ -1831,6 +1856,14 @@ def _pubs(client):
     for c in client.publish.call_args_list:
         out.setdefault(c.args[0], []).append(c.args[1])
     return out
+
+
+def _dry_session(mod):
+    """The persisted supervised session file, or None when nothing is armed."""
+    p = Path(mod.DRY_SESSION_FILE)
+    if not p.is_file():
+        return None
+    return json.loads(p.read_text())
 
 
 def test_mqtt_transport_mode_never_opens_the_device_websocket(tmp_path):
@@ -1944,7 +1977,7 @@ def test_native_snapshot_publishes_dry_time_as_minutes(tmp_path):
 
 
 @pytest.mark.parametrize("cancel_topic,cancel_value", [("manual", "PRESS"), ("auto", "PRESS"), ("mode_select", "Manual")])
-def test_mqtt_dry_press_json_uses_start_drying_never_a_frame_burst(tmp_path, cancel_topic, cancel_value):
+def test_mqtt_dry_press_json_arms_supervisor_never_a_frame_burst(tmp_path, cancel_topic, cancel_value):
     ft = _FakeNativeTransport()
     mod, client, _ = _mqtt_mod(tmp_path, [ft])
     mod.mqtt_client = client
@@ -1959,16 +1992,24 @@ def test_mqtt_dry_press_json_uses_start_drying_never_a_frame_burst(tmp_path, can
     for coro in captured:
         with patch.object(mod, "log_event"):
             asyncio.run(coro)
-    assert ft.starts and ft.starts[0][0] == 52 and ft.starts[0][1] == 8
-    assert callable(ft.starts[0][2])
-    assert ft.starts[0][2]() is False
+    # The supervisor is the sole owner of the supervised start: nothing starts
+    # directly and no legacy frame burst — the session is persisted before any
+    # device write, and the supervisor performs the first ON itself.
+    assert ft.starts == [] and ft.recovers == [] and ft.sent == []
+    session = _dry_session(mod)
+    assert session and session["status"] == "running" and session["target_c"] == 52
+    assert session["deadline"] == pytest.approx(time.time() + 8 * 3600, abs=15)
+    assert session["pending_stop"] is False and session["session_id"]
     pending = []
     with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(pending)):
         mod.on_mqtt_message(client, None, _fake_msg("dummy/panda/" + cancel_topic + "/set", cancel_value))
     for coro in pending:
         coro.close()
-    assert ft.starts[0][2]() is True
-    assert ft.sent == []                           # no legacy settings frames either
+    # mode changes cancel the supervised session first, persisting the stop
+    # obligation before any device command runs
+    session = _dry_session(mod)
+    assert session["status"] == "cancelled" and session["pending_stop"] is True
+    assert ft.sent == [] and ft.starts == []     # no legacy settings frames either
 
 
 def test_mqtt_press_without_json_uses_current_settings_minutes_as_hours(tmp_path):
@@ -1976,24 +2017,28 @@ def test_mqtt_press_without_json_uses_current_settings_minutes_as_hours(tmp_path
     mod, client, _ = _mqtt_mod(tmp_path, [ft])
     mod.panda_ws = ft
     mod.main_loop = MagicMock()
-    mod.current_data.update(filament_temp=55, filament_timer=180)   # minutes
+    mod.current_data.update(filament_temp=55, filament_timer=90)   # not whole hours
     captured = []
     with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(captured)):
         mod.on_mqtt_message(client, None, _fake_msg("dummy/panda/drying/set", ""))
     for coro in captured:
         with patch.object(mod, "log_event"):
             asyncio.run(coro)
-    assert ft.starts and ft.starts[0] == (55, 3, ft.starts[0][2])
-    # A duration that cannot be represented in whole hours is refused outright.
-    ft.starts.clear()
-    mod.current_data["filament_timer"] = 90
+    # A duration that cannot be represented in whole hours is refused outright:
+    # no session at all, nothing written.
+    assert _dry_session(mod) is None
+    assert ft.starts == [] and ft.recovers == [] and ft.sent == []
+    mod.current_data["filament_timer"] = 180                       # 3 whole hours
     captured.clear()
     with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(captured)):
         mod.on_mqtt_message(client, None, _fake_msg("dummy/panda/drying/set", ""))
     for coro in captured:
         with patch.object(mod, "log_event"):
             asyncio.run(coro)
-    assert ft.starts == []
+    session = _dry_session(mod)
+    assert session and session["target_c"] == 55
+    assert session["deadline"] == pytest.approx(time.time() + 3 * 3600, abs=15)
+    assert ft.starts == [] and ft.recovers == [] and ft.sent == []
 
 
 def test_mqtt_explicit_json_duration_hours_is_canonical(tmp_path):
@@ -2010,8 +2055,99 @@ def test_mqtt_explicit_json_duration_hours_is_canonical(tmp_path):
     for coro in captured:
         with patch.object(mod, "log_event"):
             asyncio.run(coro)
-    assert ft.starts[0][:2] == (50, 8)             # JSON wins over current settings
-    assert ft.sent == []
+    session = _dry_session(mod)
+    assert session["target_c"] == 50                                # JSON wins over current settings
+    assert session["deadline"] == pytest.approx(time.time() + 8 * 3600, abs=15)
+    assert ft.starts == [] and ft.sent == []
+
+
+def test_mqtt_supervisor_owns_first_start_and_second_press_moves_nothing(tmp_path):
+    ft = _FakeNativeTransport()
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    mod.panda_ws = ft
+    mod._cc2_press_button = MagicMock()
+
+    async def run():
+        mod.main_loop = asyncio.get_running_loop()
+        mod.DRY_SUPERVISE_TICK_S = 0.02
+        mod.on_mqtt_message(client, None, _fake_msg(
+            "dummy/panda/drying/set",
+            json.dumps({"enabled": True, "duration_hours": 8, "temperature_c": 52})))
+        await asyncio.sleep(0.05)
+        deadline0 = _dry_session(mod)["deadline"]
+        task = asyncio.create_task(mod.supervised_drying_loop())
+        try:
+            stop_t = time.monotonic() + 5
+            while not ft.recovers and time.monotonic() < stop_t:
+                await asyncio.sleep(0.01)
+            assert ft.recovers == [(52, deadline0)], ft.recovers   # supervisor's own start
+            assert ft.starts == []                                  # never the direct flow
+            # second explicit press: rejected, the fixed deadline is not moved
+            mod.on_mqtt_message(client, None, _fake_msg(
+                "dummy/panda/drying/set",
+                json.dumps({"enabled": True, "duration_hours": 8, "temperature_c": 52})))
+            await asyncio.sleep(0.1)
+            assert _dry_session(mod)["deadline"] == deadline0
+            assert len(ft.recovers) == 1
+            # deadline/status/pending_stop mirror through existing MQTT telemetry
+            mirror = [json.loads(s) for s in _pubs(client)["dummy/panda/dry_session"]]
+            assert mirror and mirror[-1]["status"] == "running"
+            assert mirror[-1]["deadline"] == deadline0
+            # work_on ON (chamber power) does NOT cancel a supervised session
+            mod.on_mqtt_message(client, None, _fake_msg("dummy/panda/work_on/set", "ON"))
+            await asyncio.sleep(0.1)
+            assert _dry_session(mod)["status"] == "running"
+            # mod Stop: cancels first (persisted), then the owed stop is delivered
+            ft.stop_result = "uncertain"
+            mod.on_mqtt_message(client, None, _fake_msg("dummy/panda/heat_stop/set", "PRESS"))
+            await asyncio.sleep(0.1)
+            session = _dry_session(mod)
+            assert session["status"] == "cancelled" and session["pending_stop"] is True
+            stop_t = time.monotonic() + 2
+            while ft.stops == 0 and time.monotonic() < stop_t:
+                await asyncio.sleep(0.01)
+            assert ft.stops >= 1
+            assert _dry_session(mod)["pending_stop"] is True        # uncertain → kept
+            ft.stop_result = "confirmed"
+            stop_t = time.monotonic() + 2
+            while _dry_session(mod)["pending_stop"] and time.monotonic() < stop_t:
+                await asyncio.sleep(0.01)
+            assert _dry_session(mod)["pending_stop"] is False
+            assert len(ft.recovers) == 1                            # never rearms
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(run())
+
+
+def test_mqtt_supervised_start_requires_fresh_idle_state(tmp_path):
+    # fresh telemetry showing drying already running: the request is refused
+    # before any write and NO session is armed (no adoption of a foreign cycle)
+    ft = _FakeNativeTransport(dry_running=True)
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    mod.panda_ws = ft
+    mod.main_loop = MagicMock()
+    captured = []
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(captured)):
+        mod.on_mqtt_message(client, None, _fake_msg(
+            "dummy/panda/drying/set",
+            json.dumps({"enabled": True, "duration_hours": 8, "temperature_c": 50})))
+    for coro in captured:
+        with patch.object(mod, "log_event"):
+            asyncio.run(coro)
+    assert _dry_session(mod) is None
+    assert ft.starts == [] and ft.recovers == [] and ft.sent == []
+
+
+def test_dry_session_state_file_honours_env_and_defaults_to_base_dir(tmp_path):
+    custom = tmp_path / "custom-dry-session.json"
+    env = dict(MQTT_ENV, PANDA_DEVICE_MQTT_PASSWORD_FILE=str(tmp_path / "pwpw"),
+               PANDA_DRY_SESSION_FILE=str(custom))
+    (tmp_path / "pwpw").write_text("s3cret\n")
+    mod, _ = load_panda(cc2_ip="192.168.1.50", env_extra=env)
+    assert Path(mod.DRY_SESSION_FILE) == custom
+    mod2, _, _ = _mqtt_mod(tmp_path, [_FakeNativeTransport()])
+    assert Path(mod2.DRY_SESSION_FILE) == mod2.PREHEAT_STATE_FILE.parent / "drying_session.json"
 
 
 def test_mqtt_dry_number_sets_forward_only_custom_field_updates(tmp_path):

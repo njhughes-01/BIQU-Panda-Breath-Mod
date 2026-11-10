@@ -234,7 +234,7 @@ class DryingSupervisor:
             # 2. Terminal sessions owe at most a confirmed stop — never recovery.
             if st["status"] in ("cancelled", "completed"):
                 if st["pending_stop"]:
-                    if transport.drying_snapshot() is None:
+                    if transport is None or transport.drying_snapshot() is None:
                         return          # unreachable: obligation stays persisted
                     res = await transport.stop_supervised()
                     if res == "confirmed":
@@ -247,9 +247,9 @@ class DryingSupervisor:
                 return
 
             # 3. Running: observe fresh state; never write from memory alone.
-            snap = transport.drying_snapshot()
+            snap = transport.drying_snapshot() if transport is not None else None
             if snap is None:
-                return                  # offline/stale: expiry handled above
+                return                  # offline/stale/no link: expiry handled above
             seq, native = snap
             if self._gate_seq is not None and seq > self._gate_seq:
                 # Fresh state after the attempt resolves an uncertain outcome.

@@ -6,6 +6,7 @@ from paho.mqtt.enums import CallbackAPIVersion
 from contextlib import asynccontextmanager
 
 import panda_native_mqtt as pnm
+import drying_supervisor
 from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 # ============================================================
@@ -325,6 +326,17 @@ _CC2_IN_FLIGHT_WINDOW = 60.0  # seconds a pause press stays plausibly "landing" 
 _cc2_heat_lock = threading.RLock()
 
 PREHEAT_STATE_FILE = BASE_DIR / "preheat_state.json"
+
+# Supervised drying session (openspec/changes/supervised-drying): an explicit
+# drying request survives reconnects and backend restarts under one fixed host
+# deadline; the mod Stop control is the cancellation. The file is runtime
+# state outside the repo-tracked settings — a deployment that recreates the
+# container must mount it (see docs/supervised-drying.md).
+DRY_SESSION_FILE = Path(os.environ.get("PANDA_DRY_SESSION_FILE") or
+                        (BASE_DIR / "drying_session.json"))
+DRY_SUPERVISE_TICK_S = 1.0
+_drying_supervisor = drying_supervisor.DryingSupervisor(
+    DRY_SESSION_FILE, logger=lambda m: log_event(m))
 PREHEAT_STATE_MAX_AGE = 43200  # 12h — discard persisted state older than this
 
 def _save_preheat_state():
@@ -1070,6 +1082,9 @@ def on_mqtt_message(client, userdata, msg):
         global_lock = True
         heating_locked = True
         global_heating_state = RELAY_OFF  # 🔥 FIX: Heizung SOFORT logisch ausschalten
+        # Supervised drying: the mod Stop cancels permanently — persist the
+        # cancellation and the owed Stop before any device command is asked for.
+        _drying_supervisor.cancel()
         if cc2_paused_for_preheat:
             cc2_paused_for_preheat = False
             _preheat_overshoot_temp = 0
@@ -1106,12 +1121,15 @@ def on_mqtt_message(client, userdata, msg):
         mode_map = {"Automatic": "auto", "Manual": "manual", "Dry": "drying"}
         target = mode_map.get(msg.payload.decode().strip())
         if target:
+            # a mode change cancels a supervised drying session first
+            _drying_supervisor.cancel()
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/{target}/set", "", retain=False)
         return
 
     # --- MANUELL MODUS ---
     if msg.topic.endswith("/manual/set"):
         log_event(">>> MANUAL MODE ENTERED <<<", force_console=True)
+        _drying_supervisor.cancel()   # mode change cancels supervised drying
         heating_locked = False
         power_forced_off = False
         current_data["slicer_priority_mode"] = False
@@ -1141,6 +1159,7 @@ def on_mqtt_message(client, userdata, msg):
     # --- AUTO MODUS ---
     if msg.topic == f"{MQTT_TOPIC_PREFIX}/auto/set":
         log_event(">>> AUTO MODE ENTERED <<<", force_console=True)
+        _drying_supervisor.cancel()   # mode change cancels supervised drying
         heating_locked = False
         power_forced_off = False
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/panda_modus", "Automatic", retain=True)
@@ -1203,12 +1222,14 @@ def on_mqtt_message(client, userdata, msg):
         dry_generation = _dry_generation
         async def flow():
             if DEVICE_TRANSPORT == "mqtt":
-                # Native mode: the transport's start operation — individual
-                # writes, per-field readback, no frame burst, no retry. A stop
-                # that bumps the generation overtakes the start via cancelled().
+                # Native mode: the SUPERVISOR is the sole owner of every
+                # supervised drying ON — including this initial start, which it
+                # performs via recover_drying only after two distinct fresh
+                # live snapshots confirm the device idle. The direct
+                # start_drying flow is deliberately not used from here.
                 tr = panda_ws
-                if tr is None or not getattr(tr, "available", False):
-                    log_event("[DRY-REJECTED] Native device transport not connected/fresh", force_console=True)
+                if tr is None or not callable(getattr(tr, "drying_snapshot", None)):
+                    log_event("[DRY-REJECTED] Native device transport not connected", force_console=True)
                     return
                 if full_dry is not None:
                     _t_c, _h_r = temp, hours          # explicit JSON: whole hours are canonical
@@ -1229,20 +1250,23 @@ def on_mqtt_message(client, userdata, msg):
                         return
                     _h_r = _mins // 60
 
-                def _native_cancelled():
-                    return dry_generation != _dry_generation or global_lock or power_forced_off or heating_locked
-
-                try:
-                    _ok = await tr.start_drying(_t_c, _h_r, cancelled=_native_cancelled)
-                except Exception as exc:
-                    _ok = False
-                    log_event(f"[DRY-UNCERTAIN] Native start raised {type(exc).__name__}: {exc}; not retrying", force_console=True)
-                if _ok:
-                    log_event(f"[DRY-STARTED] Native custom dry {_t_c}C for {_h_r}h confirmed by device readback", force_console=True)
-                elif getattr(tr, "start_status", None) == "uncertain":
-                    log_event(f"[DRY-UNCERTAIN] Native custom dry {_t_c}C/{_h_r}h delivery unknown; NOT retrying; see {MQTT_TOPIC_PREFIX}/dry_start_status", force_console=True)
-                else:
-                    log_event(f"[DRY-FAILED] Native custom dry {_t_c}C/{_h_r}h rejected before writing; see {MQTT_TOPIC_PREFIX}/dry_start_status", force_console=True)
+                # Fresh idle validation BEFORE any write: running means refuse;
+                # a stale positive remaining alone is not "running".
+                _snap = tr.drying_snapshot()
+                if _snap is None:
+                    log_event("[DRY-REJECTED] No fresh live device state; supervised dry not armed", force_console=True)
+                    return
+                if _snap[1].get("drying_running") == "ON":
+                    log_event("[DRY-REJECTED] Device reports drying already running; nothing armed", force_console=True)
+                    return
+                if not _drying_supervisor.arm(_t_c, _h_r):
+                    log_event("[DRY-REJECTED] Supervised session refused (one is already active "
+                              "and its deadline stands, or persistence failed)", force_console=True)
+                    return
+                _st = _drying_supervisor.status()
+                log_event(f">>> DRY SUPERVISED: {_t_c}C until "
+                          f"{time.strftime('%H:%M', time.localtime(_st['deadline']))} — automatic "
+                          f"restart armed; the mod Stop control cancels <<<", force_console=True)
                 return
             if full_dry is not None:
                 # V1.0.3's own UI writes custom settings in hours, selects custom,
@@ -1279,6 +1303,10 @@ def on_mqtt_message(client, userdata, msg):
     if msg.topic == f"{MQTT_TOPIC_PREFIX}/work_on/set":
         payload = msg.payload.decode().strip().lower()
         is_on = payload in ("on", "1", "true")
+        if not is_on:
+            # work_on OFF is a Stop: cancel supervised drying first (persisted).
+            # An unrelated work_on ON must never cancel the session.
+            _drying_supervisor.cancel()
         async def p_flow():
             async with _get_panda_cmd_lock():
                 if panda_ws:
@@ -1316,6 +1344,7 @@ def on_mqtt_message(client, userdata, msg):
             log_event(">>> PANDA POWER OFF <<<", force_console=True)
             heating_locked = True
             power_forced_off = True
+            _drying_supervisor.cancel()   # power OFF cancels supervised drying
             if cc2_paused_for_preheat:
                 cc2_paused_for_preheat = False
                 _preheat_overshoot_temp = 0
@@ -3201,6 +3230,42 @@ async def ha_cc2_poller():
         await asyncio.sleep(3)
 
 
+# ── supervised drying service (openspec/changes/supervised-drying) ─────────
+async def supervised_drying_loop():
+    """Independent 1 Hz service for the armed supervised drying session.
+
+    Runs even while no device link exists, so the fixed host deadline still
+    expires and its pending Stop stays owed; the supervisor is the sole owner
+    of supervised ON operations and of the Stop it requests at expiry. The
+    session mirrors through the existing MQTT telemetry only when it changes.
+    """
+    last_mirror = None
+    while True:
+        await asyncio.sleep(DRY_SUPERVISE_TICK_S)
+        tr = panda_ws if (DEVICE_TRANSPORT == "mqtt" and
+                          callable(getattr(panda_ws, "drying_snapshot", None))) else None
+
+        def _sup_cancelled():
+            return bool(global_lock or power_forced_off or heating_locked)
+
+        try:
+            await _drying_supervisor.tick(tr, _sup_cancelled)
+        except Exception as exc:
+            log_event(f"[DRY-SUPERVISED] tick failed: {type(exc).__name__}: {exc}",
+                      force_console=True)
+        st = _drying_supervisor.status()
+        mirror = (st["status"], st["deadline"], st["pending_stop"], st["recovering"])
+        if mirror != last_mirror:
+            last_mirror = mirror
+            mqtt_client.publish(
+                f"{MQTT_TOPIC_PREFIX}/dry_session",
+                json.dumps({"status": st["status"], "session_id": st["session_id"],
+                            "target_c": st["target_c"], "deadline": st["deadline"],
+                            "pending_stop": st["pending_stop"],
+                            "recovering": st["recovering"]}),
+                retain=True)
+
+
 async def main():
     global main_loop
     main_loop = asyncio.get_running_loop()
@@ -3209,6 +3274,11 @@ async def main():
         await asyncio.Event().wait()
         return
     asyncio.create_task(update_limits_from_ws())
+    if DEVICE_TRANSPORT == "mqtt":
+        # Supervised drying exists only on the native path (its recovery
+        # operation lives on the native transport); legacy WS keeps the old
+        # behavior untouched.
+        asyncio.create_task(supervised_drying_loop())
     if CC2_HA_MODE:
         asyncio.create_task(ha_cc2_poller())
     if not CC2_ACTIVE:
