@@ -2139,6 +2139,74 @@ def test_mqtt_supervised_start_requires_fresh_idle_state(tmp_path):
     assert ft.starts == [] and ft.recovers == [] and ft.sent == []
 
 
+def test_queued_dry_flow_never_arms_after_an_intervening_stop(tmp_path):
+    """The captured generation is re-checked IMMEDIATELY before arming.
+
+    A Stop processed while the drying flow was still queued must leave no
+    session persisted and no device write — the older queued flow may not arm
+    over a cancellation it was queued before."""
+    ft = _FakeNativeTransport()
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    mod.panda_ws = ft
+    mod.main_loop = MagicMock()
+    mod._cc2_press_button = MagicMock()
+    captured = []
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(captured)):
+        mod.on_mqtt_message(client, None, _fake_msg(
+            "dummy/panda/drying/set",
+            json.dumps({"enabled": True, "duration_hours": 8, "temperature_c": 52})))
+    assert len(captured) == 1                       # the start is queued, not run
+    later = []
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(later)):
+        mod.on_mqtt_message(client, None, _fake_msg("dummy/panda/work_on/set", "OFF"))
+    for coro in later:
+        coro.close()                                # this Stop's own write is not the check
+    # now execute the OLDER queued drying flow: it must refuse
+    with patch.object(mod, "log_event"):
+        asyncio.run(captured[0])
+    assert _dry_session(mod) is None                # nothing armed, nothing to stop
+    assert ft.starts == [] and ft.recovers == [] and ft.sent == []
+    # ... and a plain start afterwards still works (the guard is not stuck)
+    fresh = []
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(fresh)):
+        mod.on_mqtt_message(client, None, _fake_msg(
+            "dummy/panda/drying/set",
+            json.dumps({"enabled": True, "duration_hours": 8, "temperature_c": 52})))
+    with patch.object(mod, "log_event"):
+        asyncio.run(fresh[0])
+    session = _dry_session(mod)
+    assert session and session["status"] == "running" and session["target_c"] == 52
+
+
+def test_malformed_dry_session_file_imports_and_logs_its_rejection(tmp_path, capsys):
+    """The supervisor loads its file during import and LOGS while rejecting a
+    corrupt record, so it must only be constructed once log_event exists: the
+    rejection has to be reported (not swallowed) and the session must simply
+    stay inactive — never a crash of the module import."""
+    (tmp_path / "pwpw").write_text("s3cret\n")
+    bad = tmp_path / "drying_session.json"
+    bad.write_text("{not json at all")
+    env = dict(MQTT_ENV, PANDA_DEBUG="true",
+               PANDA_DEVICE_MQTT_PASSWORD_FILE=str(tmp_path / "pwpw"),
+               PANDA_DRY_SESSION_FILE=str(bad))
+    mod, client = load_panda(cc2_ip="192.168.1.50", env_extra=env)   # must not raise
+    assert "persisted session unreadable" in capsys.readouterr().out   # logger existed
+    assert mod._drying_supervisor.status()["status"] == "inactive"
+    ft = _FakeNativeTransport()
+    mod.panda_ws = ft
+    mod.main_loop = MagicMock()
+    captured = []
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(captured)):
+        mod.on_mqtt_message(client, None, _fake_msg(
+            "dummy/panda/drying/set",
+            json.dumps({"enabled": True, "duration_hours": 8, "temperature_c": 50})))
+    with patch.object(mod, "log_event"):
+        asyncio.run(captured[0])
+    # an unusable persisted record does not block a fresh explicit request
+    session = _dry_session(mod)
+    assert session and session["status"] == "running"
+
+
 def test_dry_session_state_file_honours_env_and_defaults_to_base_dir(tmp_path):
     custom = tmp_path / "custom-dry-session.json"
     env = dict(MQTT_ENV, PANDA_DEVICE_MQTT_PASSWORD_FILE=str(tmp_path / "pwpw"),

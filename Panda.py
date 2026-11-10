@@ -335,8 +335,10 @@ PREHEAT_STATE_FILE = BASE_DIR / "preheat_state.json"
 DRY_SESSION_FILE = Path(os.environ.get("PANDA_DRY_SESSION_FILE") or
                         (BASE_DIR / "drying_session.json"))
 DRY_SUPERVISE_TICK_S = 1.0
-_drying_supervisor = drying_supervisor.DryingSupervisor(
-    DRY_SESSION_FILE, logger=lambda m: log_event(m))
+# The supervisor INSTANCE is built further down, right after log_event exists:
+# constructing it loads the persisted session, and a malformed file logs while
+# it does so — a logger that does not exist yet would crash the import instead
+# of leaving the session inactive and inhibited.
 PREHEAT_STATE_MAX_AGE = 43200  # 12h — discard persisted state older than this
 
 def _save_preheat_state():
@@ -505,7 +507,37 @@ def log_event(msg, force_console=False):
             )
     except Exception:
         pass
-            
+
+# Supervised drying session owner (openspec/changes/supervised-drying): built
+# here, after log_event is defined, for exactly the reason noted above.
+_drying_supervisor = drying_supervisor.DryingSupervisor(
+    DRY_SESSION_FILE, logger=lambda m: log_event(m))
+
+# Short threading lock (never held across an await) around the cancellation
+# intent and the queued drying flow's check-then-arm, so a Stop arriving on the
+# MQTT callback thread cannot slip between "no Stop happened" and "session
+# persisted", and a Stop can never be undone by an already-queued start.
+_dry_control_lock = threading.RLock()
+
+
+def _dry_cancel_intent(reason):
+    """Advance the command generation and persist the supervised cancellation as
+    one step, atomically against a queued drying flow's check-then-arm. Returns
+    what the supervisor persisted (True = the obligation is durable)."""
+    global _dry_generation
+    with _dry_control_lock:
+        _dry_generation += 1
+        before = _drying_supervisor.status()
+        ok = _drying_supervisor.cancel()
+    if before["status"] == "running":
+        log_event(f"[DRY-CANCEL] {reason}: supervised drying cancelled; its Stop "
+                  f"is owed{' and persisted' if ok else ' but NOT DURABLE (persistence failed)'}",
+                  force_console=True)
+    elif before["pending_stop"]:
+        log_event(f"[DRY-CANCEL] {reason}: a supervised Stop is still owed "
+                  f"({before['status']} session)", force_console=True)
+    return ok
+
 # --- HELPER ---
 def safe_float(v, default=0.0):
     try:
@@ -942,7 +974,8 @@ def on_mqtt_message(client, userdata, msg):
         log_event(f"[NATIVE] Retained control input ignored: {msg.topic}")
         return
     if msg.topic.rsplit('/', 2)[-2:] in (["heat_stop", "set"], ["work_on", "set"], ["panda_power", "set"], ["drying", "set"], ["manual", "set"], ["auto", "set"], ["mode_select", "set"]):
-        _dry_generation += 1
+        with _dry_control_lock:
+            _dry_generation += 1
     # ✅ FIX: Alle globalen Deklarationen MÜSSEN am Anfang der Funktion stehen
     global current_data
     global last_ha_change
@@ -1084,7 +1117,7 @@ def on_mqtt_message(client, userdata, msg):
         global_heating_state = RELAY_OFF  # 🔥 FIX: Heizung SOFORT logisch ausschalten
         # Supervised drying: the mod Stop cancels permanently — persist the
         # cancellation and the owed Stop before any device command is asked for.
-        _drying_supervisor.cancel()
+        _dry_cancel_intent("mod Stop")
         if cc2_paused_for_preheat:
             cc2_paused_for_preheat = False
             _preheat_overshoot_temp = 0
@@ -1122,14 +1155,14 @@ def on_mqtt_message(client, userdata, msg):
         target = mode_map.get(msg.payload.decode().strip())
         if target:
             # a mode change cancels a supervised drying session first
-            _drying_supervisor.cancel()
+            _dry_cancel_intent(f"mode change to {target}")
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/{target}/set", "", retain=False)
         return
 
     # --- MANUELL MODUS ---
     if msg.topic.endswith("/manual/set"):
         log_event(">>> MANUAL MODE ENTERED <<<", force_console=True)
-        _drying_supervisor.cancel()   # mode change cancels supervised drying
+        _dry_cancel_intent("manual mode")   # mode change cancels supervised drying
         heating_locked = False
         power_forced_off = False
         current_data["slicer_priority_mode"] = False
@@ -1159,7 +1192,7 @@ def on_mqtt_message(client, userdata, msg):
     # --- AUTO MODUS ---
     if msg.topic == f"{MQTT_TOPIC_PREFIX}/auto/set":
         log_event(">>> AUTO MODE ENTERED <<<", force_console=True)
-        _drying_supervisor.cancel()   # mode change cancels supervised drying
+        _dry_cancel_intent("auto mode")   # mode change cancels supervised drying
         heating_locked = False
         power_forced_off = False
         mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/panda_modus", "Automatic", retain=True)
@@ -1250,19 +1283,31 @@ def on_mqtt_message(client, userdata, msg):
                         return
                     _h_r = _mins // 60
 
-                # Fresh idle validation BEFORE any write: running means refuse;
-                # a stale positive remaining alone is not "running".
-                _snap = tr.drying_snapshot()
-                if _snap is None:
-                    log_event("[DRY-REJECTED] No fresh live device state; supervised dry not armed", force_console=True)
-                    return
-                if _snap[1].get("drying_running") == "ON":
-                    log_event("[DRY-REJECTED] Device reports drying already running; nothing armed", force_console=True)
-                    return
-                if not _drying_supervisor.arm(_t_c, _h_r):
-                    log_event("[DRY-REJECTED] Supervised session refused (one is already active "
-                              "and its deadline stands, or persistence failed)", force_console=True)
-                    return
+                # Fresh idle validation BEFORE any write, and the captured
+                # generation re-checked IMMEDIATELY before arming — all under
+                # the cancellation lock, with no await inside it: a Stop that
+                # landed while this flow was queued (or lands now) means no
+                # session is armed and nothing is written to the device.
+                with _dry_control_lock:
+                    if dry_generation != _dry_generation:
+                        log_event("[DRY-CANCELLED] Superseded by another control "
+                                  "command before arming; nothing started",
+                                  force_console=True)
+                        return
+                    # running means refuse; a stale positive remaining alone
+                    # is not "running".
+                    _snap = tr.drying_snapshot()
+                    if _snap is None:
+                        log_event("[DRY-REJECTED] No fresh live device state; supervised dry not armed", force_console=True)
+                        return
+                    if _snap[1].get("drying_running") == "ON":
+                        log_event("[DRY-REJECTED] Device reports drying already running; nothing armed", force_console=True)
+                        return
+                    if not _drying_supervisor.arm(_t_c, _h_r):
+                        log_event("[DRY-REJECTED] Supervised session refused (one is already active "
+                                  "and its deadline stands, a Stop is still owed, or persistence failed)",
+                                  force_console=True)
+                        return
                 _st = _drying_supervisor.status()
                 log_event(f">>> DRY SUPERVISED: {_t_c}C until "
                           f"{time.strftime('%H:%M', time.localtime(_st['deadline']))} — automatic "
@@ -1306,7 +1351,7 @@ def on_mqtt_message(client, userdata, msg):
         if not is_on:
             # work_on OFF is a Stop: cancel supervised drying first (persisted).
             # An unrelated work_on ON must never cancel the session.
-            _drying_supervisor.cancel()
+            _dry_cancel_intent("work_on OFF")
         async def p_flow():
             async with _get_panda_cmd_lock():
                 if panda_ws:
@@ -1344,7 +1389,7 @@ def on_mqtt_message(client, userdata, msg):
             log_event(">>> PANDA POWER OFF <<<", force_console=True)
             heating_locked = True
             power_forced_off = True
-            _drying_supervisor.cancel()   # power OFF cancels supervised drying
+            _dry_cancel_intent("heater power OFF")   # power OFF cancels supervised drying
             if cc2_paused_for_preheat:
                 cc2_paused_for_preheat = False
                 _preheat_overshoot_temp = 0
