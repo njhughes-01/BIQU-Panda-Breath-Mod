@@ -1979,8 +1979,11 @@ def _publish_native_device_status(tr):
                         "unknown" if age is None else f"{age:.1f}", retain=True)
     mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/dry_start_status",
                         getattr(tr, "start_status", None) or "idle", retain=True)
+    evidence = _native_heating_evidence(tr)
     mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/dry_heating_confirmed",
-                        _native_heating_evidence(tr), retain=True)
+                        evidence, retain=True)
+    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/heating",
+                        "ON" if evidence == "confirmed" else "OFF", retain=True)
 
 
 @asynccontextmanager
@@ -2713,11 +2716,12 @@ async def update_limits_from_ws():
                             )
                             _last_heat_log_time = _now_log
 
-                        mqtt_client.publish(
-                            f"{MQTT_TOPIC_PREFIX}/heating",
-                            "ON" if heating_active else "OFF",
-                            retain=True
-                        )
+                        if DEVICE_TRANSPORT != "mqtt":
+                            mqtt_client.publish(
+                                f"{MQTT_TOPIC_PREFIX}/heating",
+                                "ON" if heating_active else "OFF",
+                                retain=True
+                            )
                         mqtt_client.publish(
                             f"{MQTT_TOPIC_PREFIX}/status",
                             info,

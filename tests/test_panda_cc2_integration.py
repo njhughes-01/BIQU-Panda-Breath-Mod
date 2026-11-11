@@ -2452,6 +2452,95 @@ def test_native_heat_report_rejects_obsolete_proof(tmp_path, proof, expected_hea
     assert (ft.sent, ft.starts, ft.recovers, ft.stops) == writes
 
 
+def test_native_heat_report_clears_after_mod_stop_while_locked(tmp_path):
+    """A locked receive loop must retract retained Heat after real mod Stop."""
+    running = {"settings": dict(SNAPSHOT["settings"], work_mode=3,
+                                work_on=1, isrunning=1)}
+
+    class PacedTransport(_FakeNativeTransport):
+        async def recv(self):
+            self.recv_calls += 1
+            snapshot = await self.telemetry.get()
+            self.dry_running = bool(snapshot["settings"]["isrunning"])
+            return json.dumps(snapshot)
+
+        async def emergency_stop(self):
+            # Observe real durable cancellation at the device-command boundary.
+            cancelled = _dry_session(mod)
+            assert cancelled["status"] == "cancelled"
+            assert cancelled["pending_stop"] is True
+            assert cancelled["session_id"] == armed["session_id"]
+            assert cancelled["deadline"] == armed["deadline"]
+            return await super().emergency_stop()
+
+    ft = PacedTransport(dry_running=True)
+    ft.heating_status = "confirmed"
+    mod, client, created = _mqtt_mod(tmp_path, [ft])
+    sup = mod.drying_supervisor.DryingSupervisor(
+        mod.DRY_SESSION_FILE, clock=lambda: 1800000000.0, monotonic=lambda: 1000.0)
+    mod._drying_supervisor = sup
+    assert sup.arm(50, 1)
+    armed = _dry_session(mod)
+
+    async def wait_for(predicate):
+        deadline = time.monotonic() + 5
+        while not predicate() and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert predicate(), "receive loop never published the requested proof"
+
+    async def run():
+        mod.main_loop = asyncio.get_running_loop()
+        ft.telemetry = asyncio.Queue()
+        ft.telemetry.put_nowait(running)
+        task = asyncio.create_task(mod.update_limits_from_ws())
+        try:
+            await wait_for(lambda: _pubs(client).get("dummy/panda/heating") == ["ON"]
+                           and _pubs(client).get("dummy/panda/dry_heating_confirmed") == ["confirmed"])
+            assert not mod.global_lock and not mod.heating_locked
+            captured = []
+            with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(captured)):
+                mod.on_mqtt_message(client, None, _fake_msg(
+                    "dummy/panda/heat_stop/set", "PRESS", retain=False))
+            assert len(captured) == 1
+            await captured[0]
+            assert mod.global_lock and mod.heating_locked
+            assert ft.emergency_calls == 1
+            stopped = sup.status()
+            assert stopped["status"] == "cancelled" and stopped["pending_stop"] is True
+            assert stopped["session_id"] == armed["session_id"]
+            assert stopped["deadline"] == armed["deadline"]
+            saved = Path(mod.DRY_SESSION_FILE).read_bytes()
+            commands = (list(ft.sent), list(ft.starts), list(ft.recovers),
+                        ft.stops, ft.emergency_calls)
+            assert commands == ([], [], [], 0, 1)
+            proof_count = len(_pubs(client)["dummy/panda/dry_heating_confirmed"])
+            ft.telemetry.put_nowait({"settings": dict(
+                running["settings"], work_on=0, isrunning=0, work_time=0)})
+            # Synchronize on OFF telemetry's proof, never on the desired Heat.
+            await wait_for(lambda: len(_pubs(client)["dummy/panda/dry_heating_confirmed"]) > proof_count
+                           and _pubs(client)["dummy/panda/dry_heating_confirmed"][-1] == "none")
+            assert ft.dry_running is False
+            assert mod.global_lock and mod.heating_locked
+            assert mod.panda_ws is ft and ft.entered == 1 and ft.exited == 0
+            assert len(created) == 1
+            assert sup.status() == stopped
+            assert Path(mod.DRY_SESSION_FILE).read_bytes() == saved
+            assert (ft.sent, ft.starts, ft.recovers, ft.stops, ft.emergency_calls) == commands
+            mod._cc2_press_button.assert_not_called()
+            for publication in client.publish.call_args_list:
+                if publication.args[0] in ("dummy/panda/heating", "dummy/panda/dry_heating_confirmed"):
+                    assert publication.kwargs["retain"] is True
+            assert _pubs(client)["dummy/panda/dry_heating_confirmed"][-1] == "none"
+            assert _pubs(client)["dummy/panda/heating"][-1] == "OFF"
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    with patch.object(mod.websockets, "connect", _no_ws_connect()), \
+         patch.object(mod, "_cc2_press_button"), patch.object(mod, "log_event"):
+        asyncio.run(run())
+
+
 def test_native_dry_temperature_rejection_is_atomic(tmp_path):
     ft = _FakeNativeTransport()
     mod, client, _ = _mqtt_mod(tmp_path, [ft])
