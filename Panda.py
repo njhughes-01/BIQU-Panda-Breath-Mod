@@ -1936,6 +1936,12 @@ async def _native_emergency_stop() -> bool:
     return False
 
 
+def _native_heating_evidence(tr):
+    """Use current-episode transport evidence; old flags cannot prove heat."""
+    report = getattr(tr, "heating_evidence_status", None)
+    return report() if callable(report) else "unknown"
+
+
 def _publish_native_device_status(tr):
     """HA-visible truth about the native link and the last dry-start attempt."""
     if tr is None:
@@ -1949,7 +1955,7 @@ def _publish_native_device_status(tr):
     mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/dry_start_status",
                         getattr(tr, "start_status", None) or "idle", retain=True)
     mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/dry_heating_confirmed",
-                        getattr(tr, "heating_status", None) or "none", retain=True)
+                        _native_heating_evidence(tr), retain=True)
 
 
 @asynccontextmanager
@@ -2626,7 +2632,7 @@ async def update_limits_from_ws():
                         # In native MQTT mode the device readback is the only proof.
                         if DEVICE_TRANSPORT == "mqtt":
                             # Enabled/timer-running are not physical relay evidence.
-                            heating_active = getattr(websocket, "heating_status", None) == "confirmed"
+                            heating_active = _native_heating_evidence(websocket) == "confirmed"
                         else:
                             heating_active = (global_heating_state == RELAY_ON) if CC2_ACTIVE else actual_heating
 

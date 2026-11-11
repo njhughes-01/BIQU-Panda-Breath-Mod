@@ -1764,6 +1764,18 @@ class _FakeNativeTransport:
             "drying_remaining_min": 60 if self.dry_running else 0,
         }
 
+    def heating_evidence_status(self):
+        if not self.available or self.status_age is None or self.status_age > 10:
+            return "unknown"
+        snap = self.drying_snapshot()
+        if snap is None:
+            return "unknown"
+        native = snap[1]
+        if (native["mode"] != "filament drying" or native["work_on"] != "ON"
+                or native["drying_running"] != "ON"):
+            return "none"
+        return self.heating_status or "none"
+
     async def recover_drying(self, temp_c, deadline, cancelled=None):
         self.recovers.append((temp_c, deadline))
         return self.recover_result
@@ -2255,7 +2267,7 @@ def test_mqtt_retained_control_inputs_are_ignored(tmp_path):
 
 
 def test_mqtt_status_topics_are_published(tmp_path):
-    ft = _FakeNativeTransport()
+    ft = _FakeNativeTransport(dry_running=True)
     ft.available = True
     ft.status_age = 1.5
     ft.start_status = "uncertain"
@@ -2398,3 +2410,43 @@ def test_startup_handles_invalid_or_stale_preheat_state(saved):
     state_file.write_text(saved)
     mod, _ = load_panda()
     assert mod.cc2_paused_for_preheat is False
+
+
+@pytest.mark.parametrize("proof,expected_heat", [
+    ("none", "OFF"), ("unknown", "OFF"), ("confirmed", "ON"),
+    ("pending", "OFF"), ("at_target", "OFF"), ("unconfirmed", "OFF"),
+    ("missing_interface", "OFF"),
+])
+def test_native_heat_report_rejects_obsolete_proof(tmp_path, proof, expected_heat):
+    ft = _FakeNativeTransport([
+        {"settings": dict(SNAPSHOT["settings"], work_mode=3,
+                          warehouse_temper=15, isrunning=proof not in ("none", "unknown"))}
+    ], dry_running=proof != "none")
+    ft.heating_status = proof if proof in ("pending", "at_target", "unconfirmed") else "confirmed"
+    ft.available = proof != "unknown"
+    ft.status_age = 0.0
+    if proof == "missing_interface":
+        ft.heating_evidence_status = None
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    # A real terminal session, with its owed Stop confirmed before reporting.
+    wall, mono = [time.time()], [1000.0]
+    sup = mod.drying_supervisor.DryingSupervisor(
+        mod.DRY_SESSION_FILE, clock=lambda: wall[0], monotonic=lambda: mono[0])
+    mod._drying_supervisor = sup
+    assert sup.arm(50, 1)
+    wall[0] += 3600
+    mono[0] += 3600
+    asyncio.run(sup.tick(ft, lambda: False))
+    before = sup.status()
+    assert before["status"] == "completed" and before["pending_stop"] is False
+    saved = Path(mod.DRY_SESSION_FILE).read_bytes()
+    writes = (list(ft.sent), list(ft.starts), list(ft.recovers), ft.stops)
+    with patch.object(mod.websockets, "connect", _no_ws_connect()), patch.object(mod, "log_event"):
+        _run_loop_briefly(mod, lambda: "dummy/panda/heating" in _pubs(client))
+    pubs = _pubs(client)
+    assert pubs["dummy/panda/heating"][-1] == expected_heat
+    assert pubs["dummy/panda/dry_heating_confirmed"][-1] == (
+        "unknown" if proof == "missing_interface" else proof)
+    assert sup.status() == before
+    assert Path(mod.DRY_SESSION_FILE).read_bytes() == saved
+    assert (ft.sent, ft.starts, ft.recovers, ft.stops) == writes
