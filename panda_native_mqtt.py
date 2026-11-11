@@ -267,6 +267,8 @@ class NativePandaTransport:
         if settings is None:
             return
         ts = self._clock()
+        if self._last_live_ts is not None and ts - self._last_live_ts > FRESH_WINDOW_S:
+            self._invalidate_heating_evidence()
         self._seq += 1
         snap = (self._seq, ts, dict(native), settings)
         self._latest = snap
@@ -325,6 +327,7 @@ class NativePandaTransport:
         return s
 
     def _invalidate_freshness(self) -> None:
+        self._invalidate_heating_evidence()
         self._last_live_ts = None
         self._queue.clear()
         self._latest = None
@@ -459,6 +462,8 @@ class NativePandaTransport:
         cmds = self._translate(settings)
         if cmds is None:
             return False                       # rejected atomically: nothing published
+        if settings.get("isrunning") in (0, False) or settings.get("work_on") in (0, False):
+            self._invalidate_heating_evidence()
         if not cmds:
             return True                        # mapping chose to skip (generic no-op)
         if not self._broker_connected or self._client is None:
@@ -619,6 +624,7 @@ class NativePandaTransport:
             self.start_status = "failed"
             self._log("[NATIVE-DRY] start refused: another start in flight")
             return False
+        self._invalidate_heating_evidence()
         self.start_status = "confirming"
 
         steps = [("custom_temp", str(temp)), ("custom_timer", str(hours)),
@@ -801,6 +807,32 @@ class NativePandaTransport:
             await self._tick()
 
     # ── heating proof (separate from timer confirmation) ───────────────────
+    def _invalidate_heating_evidence(self) -> None:
+        """End this observation without changing timer/Stop/latch ownership."""
+        self.heating_status = None
+        self._heat_pre_temp = None
+        self._heat_deadline = None
+        if self._heat_task is not None:
+            self._heat_task.cancel()
+            self._heat_task = None
+
+    @staticmethod
+    def _running_dry(native: dict) -> bool:
+        return (native.get("mode") == "filament drying"
+                and native.get("work_on") == "ON"
+                and native.get("drying_running") == "ON")
+
+    def heating_evidence_status(self) -> str:
+        """Current episode's rise evidence, never physical relay measurement."""
+        native = self._latest_native()
+        if not self.available or native is None:
+            self._invalidate_heating_evidence()
+            return "unknown"
+        if not self._running_dry(native):
+            self._invalidate_heating_evidence()
+            return "none"
+        return self.heating_status or "none"
+
     def _start_heat_watch(self, pre_temp: float, target: float) -> None:
         self._heat_pre_temp = pre_temp
         self._heat_deadline = self._clock() + HEAT_PROOF_S
@@ -814,6 +846,8 @@ class NativePandaTransport:
     async def _heat_watchdog(self) -> None:
         try:
             while self.heating_status == "pending" and self._client is not None:
+                if self.heating_evidence_status() != "pending":
+                    break
                 native = self._latest_native()
                 if native is not None:
                     self._observe_heating(native)
@@ -827,7 +861,10 @@ class NativePandaTransport:
             pass
 
     def _observe_heating(self, native: dict) -> None:
-        if not self.available or self.heating_status != "pending" or self._heat_pre_temp is None:
+        if not self.available or not self._running_dry(native):
+            self._invalidate_heating_evidence()
+            return
+        if self.heating_status != "pending" or self._heat_pre_temp is None:
             return
         # Deadline is checked FIRST: a >=2C rise observed after the 5-minute
         # window must NOT confirm (Sol review).
@@ -845,6 +882,7 @@ class NativePandaTransport:
         """Publish the native off pair and CONFIRM it only from post-write
         device telemetry. Never claims heater-off from broker rc alone."""
         self._stop_generation += 1
+        self._invalidate_heating_evidence()
         if not self._broker_connected or self._client is None:
             return False
         point = self._seq
@@ -928,6 +966,7 @@ class NativePandaTransport:
             self.start_status = "failed"
             self._log("[NATIVE-DRY] recovery refused: deadline already passed")
             return "failed"
+        self._invalidate_heating_evidence()
         self.start_status = "confirming"
 
         steps = [("custom_temp", str(temp_c)), ("custom_timer", str(hours0)),

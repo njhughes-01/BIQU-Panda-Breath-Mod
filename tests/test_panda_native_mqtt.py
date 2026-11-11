@@ -975,7 +975,7 @@ def test_heating_confirmed_after_2C_rise_within_5min():
 def test_heating_unconfirmed_after_5min_without_rise():
     async def scenario():
         tr, client, clock = await connected_transport()
-        start_with_responder(tr, client, chamber=24.5)
+        state, _ = start_with_responder(tr, client, chamber=24.5)
         ok = await tr.start_drying(50, 8, lambda: False)
         assert ok is True
         adv_done = asyncio.Event()
@@ -984,6 +984,7 @@ def test_heating_unconfirmed_after_5min_without_rise():
             while not adv_done.is_set():
                 await asyncio.sleep(0.005)
                 clock.advance(10.0)
+                client.fire_state(dict(state))  # continuous telemetry throughout proof
         adv = asyncio.ensure_future(advance_clock())
         for _ in range(40):
             await asyncio.sleep(0.005)
@@ -1107,14 +1108,18 @@ def test_heating_proof_refuses_rise_after_the_5_min_deadline():
     async def scenario():
         from panda_native_mqtt import HEAT_PROOF_S, HEAT_RISE_C
         tr, client, clock = await connected_transport()
-        tr.heating_status = "pending"
-        tr._heat_pre_temp = 24.5
-        tr._heat_deadline = clock() + HEAT_PROOF_S
-        clock.advance(HEAT_PROOF_S + 1)              # window closed
-        client.fire_state(full_state(chamber_temp=24.5 + HEAT_RISE_C + 1))
+        state, _ = start_with_responder(tr, client, chamber=24.5)
+        assert await tr.start_drying(50, 8, lambda: False)
+        # Stay continuously observed until the proof deadline, then report rise.
+        for _ in range(30):
+            clock.advance(10)
+            client.fire_state(dict(state))
+            await asyncio.sleep(0)
+        clock.advance(1)
+        client.fire_state(dict(state, chamber_temp=24.5 + HEAT_RISE_C + 1))
         await asyncio.sleep(0)
-        await stop_transport(tr)
         assert tr.heating_status == "unconfirmed"
+        await stop_transport(tr)
     asyncio.run(scenario())
 
 
@@ -1410,5 +1415,89 @@ def test_stop_supervised_reports_confirmed_only_from_fresh_off_readback():
         client.fire_disconnect()
         await asyncio.sleep(0)
         assert await tr.stop_supervised() == "uncertain"
+        await stop_transport(tr)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('ending', [
+    {'drying_running': 'OFF'}, {'work_on': 'OFF'}, {'mode': 'auto mode'},
+])
+@pytest.mark.parametrize('prove_first', [True, False])
+def test_heat_evidence_ends_with_dry_episode(ending, prove_first):
+    async def scenario():
+        tr, client, clock = await connected_transport()
+        state, _ = start_with_responder(tr, client, chamber=24.5)
+        assert await tr.start_drying(50, 8, lambda: False)
+        if prove_first:
+            client.fire_state(dict(state, chamber_temp=26.6))
+            await asyncio.sleep(0)
+            assert tr.heating_status == 'confirmed'
+        before = list(client.published)
+        client.fire_state(dict(state, chamber_temp=15, drying_remaining_min=480, **ending))
+        await asyncio.sleep(0)
+        assert tr.heating_status != 'confirmed'
+        assert tr.heating_evidence_status() == 'none'
+        # Residual warmth after OFF cannot complete the old pending watch.
+        client.fire_state(dict(state, chamber_temp=30, **ending))
+        await asyncio.sleep(0.02)
+        assert tr.heating_evidence_status() == 'none'
+        assert client.published == before
+        await stop_transport(tr)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('interruption', ['stop', 'send_stop', 'disconnect', 'availability', 'gap'])
+def test_heat_evidence_cannot_survive_stop_or_gap(interruption):
+    async def scenario():
+        tr, client, clock = await connected_transport()
+        state, _ = start_with_responder(tr, client, chamber=24.5)
+        assert await tr.start_drying(50, 8, lambda: False)
+        client.fire_state(dict(state, chamber_temp=26.6))
+        await asyncio.sleep(0)
+        assert tr.heating_status == 'confirmed'
+        # No simulated readback for the stop: broker delivery cannot prove OFF.
+        client.publish = lambda topic, payload=None, **kw: (client.published.append((topic, payload, kw)) or FakePublish())
+        if interruption == 'stop':
+            assert await advance_clock_during(tr.stop_supervised(), clock) == 'uncertain'
+        elif interruption == 'send_stop':
+            assert await one_send(tr, {'work_on': False, 'isrunning': 0})
+        elif interruption == 'disconnect':
+            client.fire_disconnect()
+            await asyncio.sleep(0)
+            assert tr.heating_evidence_status() == 'unknown'
+            client.fire_connect()
+            await asyncio.sleep(0)
+        elif interruption == 'availability':
+            client.fire_state(b'offline', topic=AVL)
+            await asyncio.sleep(0)
+            assert tr.heating_evidence_status() == 'unknown'
+            client.fire_state(b'online', topic=AVL)
+            await asyncio.sleep(0)
+        else:
+            clock.advance(10.1)  # no getter/watchdog tick before the new ON
+        client.fire_state(dict(state, chamber_temp=30))
+        await asyncio.sleep(0)
+        assert tr.heating_status != 'confirmed'
+        assert tr.heating_evidence_status() == 'none'
+        # Untrusted packets cannot begin a new proof.
+        for payload, kw in [(dict(state, chamber_temp=40), {'retain': True}),
+                            (dict(state, chamber_temp=40), {'topic': STA+'other'}),
+                            (b'{bad', {})]:
+            client.fire_state(payload, **kw)
+            await asyncio.sleep(0)
+        assert tr.heating_evidence_status() == 'none'
+        # A subsequent real recovery gets its own baseline, never the old rise.
+        state.update(drying_running='OFF', chamber_temp=35)
+        client.fire_state(dict(state))
+        await asyncio.sleep(0)
+        attach(client, recovery_responder(client, state))
+        assert await tr.recover_drying(50, time.time()+3600, lambda: False) == 'confirmed'
+        assert tr.heating_evidence_status() == 'pending'
+        client.fire_state(dict(state, chamber_temp=36))
+        await asyncio.sleep(0)
+        assert tr.heating_evidence_status() == 'pending'
+        client.fire_state(dict(state, chamber_temp=37.1))
+        await asyncio.sleep(0)
+        assert tr.heating_evidence_status() == 'confirmed'
         await stop_transport(tr)
     asyncio.run(scenario())

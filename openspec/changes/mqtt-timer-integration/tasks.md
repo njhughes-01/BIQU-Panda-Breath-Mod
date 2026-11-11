@@ -65,6 +65,8 @@ For each material correction: write the focused reproducer first, retain its exp
 
 ### 7. Invalidate obsolete native heating evidence
 
+**Execution stopped (Sol, 2026-11-11):** task 7 is incomplete. Retained red: 11 failed / 61 deselected; first post-fix file: 5 failed / 67 passed. The five failures reach the new recovery continuation after evidence invalidation assertions pass. Two-attempt limit reached (including red); no third run or further implementation. Partial source/tests preserved for Astra. Complete commands, dirty hashes, images, exits and full output: `~/docs/3d-printing/panda-mqtt-timer-correction-20261111/`. Tasks 8–14 not started. Nathan subsequently restored task 14 to scope and withdrew PETG arbitration as a deployment decision; this stop is the test-attempt gate, not a PETG blocker.
+
 **Files:** `panda_native_mqtt.py`, `tests/test_panda_native_mqtt.py`.
 **Interface:** add `NativePandaTransport.heating_evidence_status() -> str` with the closed semantics in `correction-round.md`. Preserve `heating_status`/start status compatibility, latch, readbacks, start signatures and Stop ordering.
 
