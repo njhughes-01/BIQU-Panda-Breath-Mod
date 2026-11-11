@@ -7,6 +7,10 @@ Review route is resolved: Nathan authorized the existing Pi Claude bridge CLI, `
 
 At `ed159dd`, raw main diff = 757,621 bytes; protected workflow findings and incomplete inherited-file coverage remain. No Jev score exists. The prior healthy final run was 260 passed / 24.02 s at that exact head on Spinx (22 CPUs, 29 GiB; one network-none lane, 2 CPUs/2 GiB). It is a baseline, not evidence for future runtime changes. The new image must be rebuilt and checked against the new tested head, including `Panda.py` hashes.
 
+Resume amendment preserves WIP `0849f342137a457706c76e9a949726eb7786de16` above `18b9ef8366290ef8508eaa424d03c8ebcdfd6f37`. `correction-round.md` records the complete failed-check provenance, statically verified publish-fixture signature mismatch and small accepted-Stop proof gap; tasks 7.1–7.3 close only those before the original tasks 8–14. No recovery algorithm/latch change is justified by the fixture failure. Expected filtered RED and unintended whole-file failure have separate budgets; the saved full-file failure counts as one. No application tests were run by the replanner.
+
+Nathan withdrew hypothetical PETG/Dry arbitration as scope expansion; no overlap was observed. Preserve ordinary PETG printing and explicitly armed Dry behavior, with no interlock/test, pending decision, general PETG waiver or new heating authority. Task 14 is authorized. Deployment still requires the parent's fresh review, exact-artifact checks and passive terminal/OFF readiness; no additional PETG decision blocks it. Main integration remains a separate unmet gate.
+
 ## Observed source / remote state (2026-11-11)
 Only read-only local Git and GitHub queries were used; no device or deployment host was contacted. The checkout was clean, branch `fix/native-panda-mqtt`, at `ad7965acae8cd5018e51dcc263b793240e0a9a51`. Preserve its unpublished ancestry; no reset, rebase, checkout/worktree change or force push.
 

@@ -44,7 +44,7 @@ Only the parent SHALL deploy after passing Opus review and final offline checks.
 #### Scenario: Corrected runtime supersedes a packaging-only review
 - **WHEN** runtime code changes after the ed159dd packaging review and passive status failure
 - **THEN** the candidate requires new exact-head focused/full-suite evidence, a rebuilt production image and a fresh independent Opus review
-- **AND** deployment remains held until the PETG/session authority decision in correction-round.md is resolved and fresh passive terminal/OFF readiness is established
+- **AND** deployment requires fresh passive terminal/OFF readiness; the withdrawn hypothetical PETG/session decision SHALL NOT be reinstated as a blocker
 
 #### Scenario: Deployment encounters an armed or stopping session
 - **WHEN** a session is active or a Stop is pending
@@ -102,10 +102,10 @@ Supervisor status SHALL report sampled clock inhibition accurately without chang
 - **THEN** inhibit is None rather than clock unusable
 - **AND** repeated status calls leave state bytes, high-water mark, deadline anchors and observation bookkeeping unchanged; real invalid/regressed/elapsed clocks retain their existing reason vocabulary
 
-### Requirement: Existing approvals do not create a PETG heating exception
-The integration SHALL honor the global prohibition on active chamber heat during PETG prints. Approval for no-print/print-end survival and physical-OFF recovery SHALL NOT be interpreted as approval for heating through a PETG print.
+### Requirement: Preserve existing PETG and explicitly armed Dry scope
+The integration SHALL preserve existing ordinary PETG printing and explicitly armed Dry contracts. This finish SHALL NOT add PETG/Dry arbitration, an interlock, an overlap test or a pending product decision. It SHALL NOT infer a general PETG policy waiver or new heat-cycle authority.
 
-#### Scenario: Current supervision can override PETG heat-off
-- **WHEN** review identifies the existing combined Dry/PETG ownership gap
-- **THEN** it is recorded as unresolved and deployment is held pending the parent's cancel-versus-inhibit decision and bounded follow-up
-- **AND** this correction round issues no active print/cycle changes and does not present ordinary PETG regressions as proof of the combined case
+#### Scenario: Hypothetical overlap requirement is withdrawn
+- **WHEN** Nathan rejects the added overlap question as scope expansion with no actual overlap observed
+- **THEN** the finish proceeds through authorized task 14 and the parent's existing review/deployment checks without that added blocker
+- **AND** ordinary PETG tests are not represented as combined-case verification, and no new print/cycle action is authorized
