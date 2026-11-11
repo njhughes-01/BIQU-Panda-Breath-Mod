@@ -2499,3 +2499,76 @@ def test_native_dry_temperature_rejection_is_atomic(tmp_path):
                if c.args[0].startswith("homeassistant/number/")]
     dry = next(c for c in configs if c["object_id"] == "panda_dry_temp")
     assert (dry["min"], dry["max"]) == (1, 80)
+
+
+@pytest.mark.parametrize("condition", ["dry", "running", "pending_stop", "stale", "uncertain_dry"])
+def test_native_work_on_cannot_bypass_dry_owner(tmp_path, condition):
+    ft = _FakeNativeTransport()
+    native = {"mode": "filament drying" if condition in ("dry", "uncertain_dry") else "auto mode",
+              "work_on": "OFF", "drying_running": "OFF", "chamber_temp": 25,
+              "custom_temp": 50, "custom_timer": 8, "drying_remaining_min": 0}
+    ft.drying_snapshot = lambda: (1, dict(native)) if ft.available else None
+    if condition == "uncertain_dry":
+        ft.start_status = "uncertain"
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    mod.panda_ws = ft
+    mod.main_loop = MagicMock()
+    if condition in ("running", "pending_stop"):
+        assert mod._drying_supervisor.arm(50, 1)
+        if condition == "pending_stop":
+            assert mod._drying_supervisor.cancel()
+    before = mod._drying_supervisor.status()
+    saved = Path(mod.DRY_SESSION_FILE).read_bytes() if Path(mod.DRY_SESSION_FILE).exists() else None
+    captured = []
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(captured)):
+        mod.on_mqtt_message(client, None, _fake_msg("dummy/panda/work_on/set", "ON"))
+    if condition == "stale":
+        ft.available = False  # freshness must be checked at execution, not enqueue
+    assert len(captured) == 1
+    asyncio.run(captured[0])
+    assert ft.sent == [] and ft.starts == [] and ft.recovers == [] and ft.stops == 0
+    assert "1" not in _pubs(client).get("dummy/panda/work_on", [])
+    assert mod._drying_supervisor.status() == before
+    assert (Path(mod.DRY_SESSION_FILE).read_bytes() if Path(mod.DRY_SESSION_FILE).exists() else None) == saved
+
+
+@pytest.mark.parametrize("cancel", ["off", "lock"])
+def test_native_work_on_queued_before_cancellation_cannot_land(tmp_path, cancel):
+    ft = _FakeNativeTransport()
+    ft.drying_snapshot = lambda: (1, {"mode": "auto mode", "work_on": "OFF", "drying_running": "OFF"})
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    mod.panda_ws = ft
+    mod.main_loop = MagicMock()
+    queued, later = [], []
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(queued)):
+        mod.on_mqtt_message(client, None, _fake_msg("dummy/panda/work_on/set", "ON"))
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(later)):
+        mod.on_mqtt_message(client, None, _fake_msg(
+            "dummy/panda/work_on/set" if cancel == "off" else "dummy/panda/heat_stop/set",
+            "OFF" if cancel == "off" else "PRESS"))
+    for coro in later:
+        coro.close()  # stop persistence/order has existing coverage; execute only old ON
+    asyncio.run(queued[0])
+    assert ft.sent == [] and ft.starts == [] and ft.recovers == []
+    assert "1" not in _pubs(client).get("dummy/panda/work_on", [])
+    assert _dry_session(mod) is None
+
+
+@pytest.mark.parametrize("transport", ["mqtt", "websocket"])
+def test_native_work_on_non_dry_preserves_legacy_envelope(tmp_path, transport):
+    ft = _FakeNativeTransport()
+    ft.drying_snapshot = lambda: (1, {"mode": "auto mode", "work_on": "OFF", "drying_running": "OFF"})
+    if transport == "mqtt":
+        mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    else:
+        mod, client = load_panda()
+    mod.panda_ws = ft
+    mod.main_loop = MagicMock()
+    queued = []
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(queued)):
+        mod.on_mqtt_message(client, None, _fake_msg(f"{mod.MQTT_TOPIC_PREFIX}/work_on/set", "ON"))
+    asyncio.run(queued[0])
+    assert ft.sent == ([{"settings": {"work_on": 1}}] if transport == "mqtt" else
+                       [{"settings": {"work_on": 1, "isrunning": 1}}])
+    assert _pubs(client)[f"{mod.MQTT_TOPIC_PREFIX}/work_on"][-1] == "1"
+    assert _dry_session(mod) is None and ft.starts == [] and ft.recovers == []

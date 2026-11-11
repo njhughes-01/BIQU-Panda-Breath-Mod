@@ -1353,12 +1353,31 @@ def on_mqtt_message(client, userdata, msg):
             # work_on OFF is a Stop: cancel supervised drying first (persisted).
             # An unrelated work_on ON must never cancel the session.
             _dry_cancel_intent("work_on OFF")
+        native_on = DEVICE_TRANSPORT == "mqtt" and is_on
+        with _dry_control_lock:
+            on_generation = _dry_generation
         async def p_flow():
             async with _get_panda_cmd_lock():
+                if native_on:
+                    # Recheck after the queued request acquires the command lock.
+                    # No await under the short cancellation/ownership lock.
+                    with _dry_control_lock:
+                        snap = panda_ws.drying_snapshot() if panda_ws is not None else None
+                        session = _drying_supervisor.status()
+                        if (on_generation != _dry_generation or global_lock
+                                or heating_locked or power_forced_off or snap is None
+                                or snap[1].get("mode") == "filament drying"
+                                or session["status"] == "running" or session["pending_stop"]):
+                            log_event("[WORK-ON-REFUSED] Native ON requires fresh non-Dry state, no supervised intent and no intervening cancel/lock", force_console=True)
+                            return
                 if panda_ws:
                     try:
                         if not is_on:
                             await panda_ws.send(json.dumps({"settings": {"isrunning": 0, "work_on": False, "work_mode": 0}}))
+                        elif native_on:
+                            accepted = await panda_ws.send(json.dumps({"settings": {"work_on": 1}}))
+                            if accepted is not False:
+                                mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/work_on", "1", retain=True)
                         else:
                             await panda_ws.send(json.dumps({"settings": {"work_on": 1, "isrunning": 1}}))
                     except Exception as e:
@@ -1366,7 +1385,8 @@ def on_mqtt_message(client, userdata, msg):
                 else:
                     log_event(f"[WORK-ON-WARN] Panda not connected — {'ON' if is_on else 'OFF'} command dropped, MQTT state updated only", force_console=True)
         asyncio.run_coroutine_threadsafe(p_flow(), main_loop)
-        mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/work_on", "1" if is_on else "0", retain=True)
+        if not native_on:
+            mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/work_on", "1" if is_on else "0", retain=True)
         return
         
     # PANDA POWER SWITCH

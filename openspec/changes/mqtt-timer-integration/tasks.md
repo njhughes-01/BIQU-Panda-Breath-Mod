@@ -104,9 +104,9 @@ For each material correction: write the focused reproducer first, retain its exp
 **Files:** `Panda.py`, `tests/test_panda_cc2_integration.py`.
 **Interface:** existing `work_on/set` topic; no new control. Explicit Dry is the only mod path to supervised Dry-start ownership.
 
-- [ ] Add `test_native_work_on_cannot_bypass_dry_owner` that actually executes captured ON coroutines (the old ON-not-cancel check closed them). For fresh Dry with no session, running supervised intent even in non-Dry mode, pending Stop, and stale state: no device settings frame, no successful optimistic ON, no arm/cancel/deadline change. Include raw uncertain start with Dry state; it must not emit timer ON.
-- [ ] Add queued ON then OFF/lock before executing ON: the old command cannot land after cancellation. Existing OFF tests must still persist cancel/pending Stop before wire writes. Positive native non-Dry case emits only work_on=1; legacy retains its previous envelope. No reset/restart to “resolve” a refusal.
-- [ ] Apply task's execution-time freshness/ownership/generation checks and log refusal, using existing locks without awaits under the threading lock. Red selector `-k 'native_work_on'`; green `tests/test_panda_cc2_integration.py`. Commit. Do not alter `panda_power`, manual mode or print arbitration in this task.
+- [x] Add `test_native_work_on_cannot_bypass_dry_owner` that actually executes captured ON coroutines (the old ON-not-cancel check closed them). For fresh Dry with no session, running supervised intent even in non-Dry mode, pending Stop, and stale state: no device settings frame, no successful optimistic ON, no arm/cancel/deadline change. Include raw uncertain start with Dry state; it must not emit timer ON.
+- [x] Add queued ON then OFF/lock before executing ON: the old command cannot land after cancellation. Existing OFF tests must still persist cancel/pending Stop before wire writes. Positive native non-Dry case emits only work_on=1; legacy retains its previous envelope. No reset/restart to “resolve” a refusal.
+- [x] Apply task's execution-time freshness/ownership/generation checks and log refusal, using existing locks without awaits under the threading lock. Red selector `-k 'native_work_on'`; green `tests/test_panda_cc2_integration.py`. Commit. Do not alter `panda_power`, manual mode or print arbitration in this task.
 
 ### 12. Report actual clock inhibition without changing the clock gate
 
