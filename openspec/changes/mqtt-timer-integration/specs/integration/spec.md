@@ -53,8 +53,18 @@ Only the parent SHALL deploy after passing Opus review and final offline checks.
 
 #### Scenario: Image rollback
 - **WHEN** candidate startup or passive verification fails
-- **THEN** the parent restores the prior supervised image and effective deployment configuration while retaining the current runtime state volume and fixed deadline
+- **THEN** the parent restores changed services serially to each service's captured prior image (supervised backend and separate web) and effective configuration while retaining current settings, runtime state volume and fixed deadline
 - **AND** it does not switch to an unsupervised image or stale session backup, drop the device overlay, or issue heater/printer commands
+
+#### Scenario: Stock startup reproduces current settings
+- **WHEN** the actual stock entrypoint generates configuration from the preserved environment
+- **THEN** the parent requires its pure in-memory prediction to match current mounted bytes immediately before and after recreation and preserves actual entrypoint/command/environment without a bypass
+- **AND** mismatch, active preheat pause or newly present unpreserved preheat state defers recreation rather than overwriting current state
+
+#### Scenario: Separate web image needs the reviewed help
+- **WHEN** the candidate contains corrected backend reporting and web help but the running web is a separate old image
+- **THEN** the parent applies image-only overrides preserving each service's effective startup/environment/networks/mounts, updates backend first, verifies fresh OFF/proof none, and only then updates web to the same reviewed artifact
+- **AND** existing API/web GETs verify help and status; only the backend connects directly to Panda, no command POST or new cycle occurs, and broker container identity and current settings/session remain unchanged
 
 ### Requirement: Native heating evidence belongs to the current observed episode
 The transport SHALL expose `heating_evidence_status()` as the source for native Heat and drying-proof reports. Confirmed evidence SHALL require the existing temperature-rise proof within the current continuously observed running Dry episode. No report SHALL claim physical relay measurement or infer OFF from command delivery.
@@ -63,6 +73,11 @@ The transport SHALL expose `heating_evidence_status()` as the source for native 
 - **WHEN** a fresh complete pinned-device snapshot reports Dry OFF, firmware work OFF or non-Dry mode after an earlier confirmed rise
 - **THEN** the old proof and pending observation are invalidated and proof reports none, with binary Heat OFF meaning no current confirmed rise evidence
 - **AND** residual remaining time or later temperature rise cannot revive that proof; no session mutation or device command is emitted by reporting
+
+#### Scenario: Mod Stop holds the safety lock while telemetry continues
+- **WHEN** the connected receive loop has published confirmed proof and Heat ON, then real mod Stop locks controls and fresh OFF telemetry arrives on that same connection
+- **THEN** retained proof becomes none and retained Heat becomes OFF while the lock remains held, without needing unlock or disconnect
+- **AND** both native publications use the same current evidence sample before the existing lock skip; reporting adds no commands and changes neither Stop order, locks, supervisor state nor deadline
 
 #### Scenario: Stop is unconfirmed or telemetry is interrupted
 - **WHEN** a stop intent is accepted or a disconnect, availability loss or telemetry gap invalidates the observation
