@@ -174,8 +174,8 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div>
         <strong style="color:#fff;display:block;margin-bottom:6px">Power &amp; Safety</strong>
-        <b>Power On / Off</b> — Controls the physical relay powering the heating element. Turn off to cut power entirely regardless of mode.<br><br>
-        <b>Stop Heat</b> — Emergency stop. Immediately halts heating and resets the target to 20°C. This also activates a safety lock.<br><br>
+        <b>Power On / Off</b> — Requests firmware enable or disable. Off cancels supervised drying. In native MQTT mode the enabled flag does not measure the physical heater relay.<br><br>
+        <b>Stop Heat</b> — Requests heating stop, cancels supervised drying and activates a safety lock. Delivery and device OFF can remain unconfirmed; check the reported status rather than assuming heating has halted.<br><br>
         <b>Unlock</b> — Clears the safety lock set by Stop Heat before normal operation can resume.
       </div>
       <div>
@@ -190,7 +190,7 @@ INDEX_HTML = """<!doctype html>
         <b>Status</b> — Current activity: Done, Heating…, Ready, etc.<br><br>
         <b>Chamber</b> — Live chamber temperature from the Panda Breath sensor.<br><br>
         <b>Bed</b> — Bed temperature. With CC2: sourced from the CC2 printer live. With Klipper: sourced from Home Assistant via the HA REST API.<br><br>
-        <b>Heat</b> — Whether the heating element relay is ON or OFF right now.<br><br>
+        <b>Heat</b> — In native MQTT mode, ON means a temperature rise was confirmed during the current continuously observed Dry episode. OFF means no current confirmed rise evidence, not physical heater OFF. This tile does not measure the relay.<br><br>
         <b>Mode</b> — Current operating mode (Automatic / Manual / Dry).<br><br>
         <b>CC2 Nozzle / Print / Progress</b> — Live metrics from the Elegoo CC2. Only populated when the cc2_backend service is running.
       </div>

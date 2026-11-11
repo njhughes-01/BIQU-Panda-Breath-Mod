@@ -51,10 +51,16 @@ substitutes a quiet WebSocket.
 ## What the native mode guarantees (and does not fake)
 
 * `work_on` is the firmware's *enabled* flag — the device has no readable
-  heater-relay field. Physical heating is reported separately: after a dry
-  start is confirmed by readback, the mod watches chamber temperature and
-  publishes `…/dry_heating_confirmed` (`pending` → `confirmed` after a ≥2 °C
-  rise within 5 min, or `at_target` honestly when already at temperature).
+  heater-relay field. After a dry start is confirmed by readback, the mod
+  watches chamber temperature and publishes `…/dry_heating_confirmed`:
+  `pending` → `confirmed` after a ≥2 °C rise within 5 min, or `at_target` when
+  already at temperature. This is rise evidence for the current continuously
+  observed running Dry episode, not a measurement of the element right now.
+  Fresh Dry OFF, firmware work OFF, non-Dry mode, an accepted Stop or a new
+  start attempt invalidates old proof. Disconnect, availability loss or a
+  telemetry gap over 10 s also ends that observation. A fresh inactive episode
+  reports `none`; unavailable/stale state reports `unknown`. Binary Heat is ON
+  only for current `confirmed` evidence; Heat OFF does not prove physical OFF.
 * Nothing fabricates `fw_version` or relay states. Retained packets, other
   devices and malformed payloads never establish control. Telemetry older than
   10 s blocks ordinary writes (stops stay allowed).
@@ -66,10 +72,22 @@ substitutes a quiet WebSocket.
   from the pinned device must show drying OFF; uncertain ON is never blindly
   replayed. A running device timer is observed without rewriting it.
 * The Panda's physical OFF button may trigger that authorized recovery; mod
-  Stop, mod power/work_on OFF, mode changes and locks permanently cancel the
-  session. Cancellation/expiry persists an owed Stop until fresh device evidence
+  Stop, mod power/work_on OFF, mod mode changes and locks permanently cancel
+  the session. A Panda-panel mode change reporting drying OFF falls under the
+  same general OFF recovery rule and may restore Dry before the deadline;
+  panel mode is not interpreted as cancellation. Use mod Stop to cancel.
+  Cancellation/expiry persists an owed Stop until fresh device evidence
   confirms OFF. Persistence/clock failures and uncertainty still veto ON;
   neither outages nor recovery extend the deadline.
+* Direct native `dry_temp/set` and transport temperature writes accept only
+  finite values in 40–60 °C before integer conversion or local acceptance.
+  Native discovery advertises 40/60; legacy limits stay unchanged. Valid
+  settings update only `custom_temp`, never a timer, mode or ON. Incoming
+  out-of-range telemetry remains visible for status and Stop.
+* Generic native `work_on ON` is refused in Dry, with running/pending-stop
+  supervised intent, stale state or an intervening cancel/lock. Outside Dry,
+  an accepted request enables only firmware `work_on`; it cannot arm, cancel
+  or reset the Dry timer. Explicit Dry remains the supervised start control.
 * Emergency stop (HA tile / `heat_stop`) writes native OFF first and confirms
   it by device readback. Only if that is unconfirmed does it open **one**
   bounded device-WebSocket connection that may send exactly the off frame
@@ -183,7 +201,7 @@ the firmware silent, not noisy) and the 1884 host firewall.
 For first installation, choose a moment when the Panda is idle. For an
 existing supervised deployment, defer recreation while a session is running
 or recovering or a Stop is pending; wait for a naturally terminal session and
-fresh confirmed OFF. The first-install commands below do not preserve that
+fresh device-reported OFF. The first-install commands below do not preserve that
 deployment's additional settings/state overrides by themselves.
 
 ```bash
@@ -215,8 +233,9 @@ direct-start log. After the two fresh OFF snapshots the supervisor attempts
 the initial start through the same guarded recovery path. A confirmed result
 logs `[DRY-SUP] recovery start confirmed by device readback`.
 `dry_start_status` uses `idle`, `confirming`, `confirmed`, `failed` and
-`uncertain` (not `started`). `dry_heating_confirmed` separately uses `none`,
-`pending`, `confirmed`, `at_target` or `unconfirmed`. Timer confirmation alone
+`uncertain` (not `started`) and describes the last start attempt, not live heat.
+`dry_heating_confirmed` separately uses `unknown`, `none`, `pending`,
+`confirmed`, `at_target` or `unconfirmed`. Timer confirmation alone
 does not prove heating; `at_target` reports temperature already at target.
 Rejected arming logs `[DRY-REJECTED]`; uncertain recovery logs
 `[DRY-SUP] recovery UNCONFIRMED` and waits for newer fresh telemetry before
@@ -232,7 +251,7 @@ For the already-supervised deployment, rollback restores the captured prior
 **supervised** image `panda-supervised:20261110-reviewed` at its verified image
 ID. Follow parent-owned task 6 in the
 [integration plan](../openspec/changes/mqtt-timer-integration/tasks.md).
-Before any recreation, establish fresh confirmed OFF, a terminal session and
+Before any recreation, establish fresh device-reported OFF, a terminal session and
 no pending Stop. Defer disruptive work if a user has armed a new session;
 unavailable telemetry blocks verification rather than proving idle.
 

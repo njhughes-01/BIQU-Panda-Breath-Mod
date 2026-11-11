@@ -31,6 +31,14 @@ first start itself after two distinct fresh live snapshots confirm the device
 idle (a couple of seconds later). A second press while a supervised session is
 active is rejected and does **not** move the finish time.
 
+Direct native temperature selection accepts only finite 40–60 °C values before
+integer conversion; invalid input leaves the prior selection unchanged and
+sends nothing. A valid selection writes only `custom_temp`, without starting
+or resetting drying. Generic native `work_on ON` is refused in Dry, during a
+running session or pending Stop, with stale telemetry or after an intervening
+cancel/lock. An accepted fresh non-Dry ON enables only firmware `work_on`;
+explicit Dry is the start control and the supervisor retains timer ownership.
+
 ## The finish time is fixed
 
 The session's finish time is `start + duration` in real wall-clock time and
@@ -71,11 +79,14 @@ before a device command is requested, and a cancelled session never rearms):
 - mod **Stop / heat-stop button** (emergency stop and lock)
 - mod **Panda power OFF** switch
 - mod **work_on OFF** control
-- any **mode change** (Manual, Automatic, or the mode-select dropdown)
+- any **mod mode change** (Manual, Automatic, or the mode-select dropdown)
 - a mod lock
 
 The **Panda's physical OFF button alone does not cancel** — that stop is
-restarted automatically, as authorized. If a cancellation Stop cannot be
+restarted automatically, as authorized. Under the same existing general OFF
+rule, a Panda-panel mode change that reports drying OFF may also restore Dry
+before the fixed deadline. The mod does not infer panel cancellation from a
+mode label; use mod Stop to cancel. If a cancellation Stop cannot be
 confirmed by fresh device telemetry, the mod keeps reporting the owed Stop
 (`pending_stop`) instead of claiming success.
 
@@ -93,10 +104,18 @@ New retained topic: `<prefix>/dry_session`, JSON, mirrored when it changes:
 The supervisor owns the initial start as well as recovery; ordinary reconnect
 alone cannot arm a session. Existing `dry_start_status` uses `idle`,
 `confirming`, `confirmed`, `failed` or `uncertain`, never `started`.
-`dry_heating_confirmed` separately uses `none`, `pending`, `confirmed`,
-`at_target` or `unconfirmed`. A confirmed timer is not heating proof;
-`at_target` means the temperature was already at target. An owed Stop is not
-confirmed physical OFF until fresh device telemetry confirms it.
+`dry_heating_confirmed` separately uses `unknown`, `none`, `pending`,
+`confirmed`, `at_target` or `unconfirmed`. `confirmed` means a ≥2 °C rise within
+5 minutes during the current continuously observed running Dry episode; it
+never measures the physical relay or guarantees the element is energized now.
+Fresh Dry OFF, work OFF or non-Dry mode, an accepted Stop or a new start
+attempt invalidates old proof. A disconnect, availability loss or telemetry
+gap over 10 s also ends that observation. Fresh inactive state reports `none`;
+unavailable/stale state reports `unknown`. Binary Heat is ON only for current
+confirmed rise evidence, and Heat OFF does not prove physical OFF.
+A confirmed timer alone is not rise proof; `at_target` means the temperature
+was already at target. Fresh post-write telemetry may confirm device-reported
+OFF and clear an owed Stop; physical relay state remains unknown.
 
 Arming logs `[DRY-SUP] armed ...` / `>>> DRY SUPERVISED: ...`; the supervisor
 logs `[DRY-SUP] recovery start confirmed by device readback` for a confirmed
@@ -142,7 +161,7 @@ Restore the captured prior supervised image `panda-supervised:20261110-reviewed`
 at its verified image ID with the prior effective Compose configuration,
 changing only the backend image and retaining **current** settings and state.
 Defer recreation for a running/recovering session or pending Stop; require a
-naturally terminal session and fresh confirmed OFF. Never roll back runtime
+naturally terminal session and fresh device-reported OFF. Never roll back runtime
 session data, drop the native overlay, switch to the pre-supervisor image,
 remove volumes or start a new cycle to verify rollback.
 
