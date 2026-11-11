@@ -96,8 +96,8 @@ For each material correction: write the focused reproducer first, retain its exp
 **Files:** `Panda.py`, `tests/test_panda_cc2_integration.py`.
 **Interface:** native `dry_temp/set` keeps valid selected value on rejection; discovery min/max 40/60; legacy branch unchanged.
 
-- [ ] Extend the existing dry-number fixture with `test_native_dry_temperature_rejection_is_atomic`: non-retained 80/-5/0/39.9/60.9/nonfinite messages leave prior filament_temp and retained selected-temperature publications unchanged, schedule no write and arm no session. Valid endpoints and 48 still emit only custom_temp and update selected temperature. Inspect captured discovery JSON for native 40/60 and unchanged legacy limits; no live HA call.
-- [ ] Validate finite/raw range before int/state mutation; log rejection. Update only native discovery bounds for that number, not unrelated setpoints or duration controls. Red selector `-k 'native_dry_temperature_rejection'`; green `tests/test_panda_cc2_integration.py`; commit.
+- [x] Extend the existing dry-number fixture with `test_native_dry_temperature_rejection_is_atomic`: non-retained 80/-5/0/39.9/60.9/nonfinite messages leave prior filament_temp and retained selected-temperature publications unchanged, schedule no write and arm no session. Valid endpoints and 48 still emit only custom_temp and update selected temperature. Inspect captured discovery JSON for native 40/60 and unchanged legacy limits; no live HA call.
+- [x] Validate finite/raw range before int/state mutation; log rejection. Update only native discovery bounds for that number, not unrelated setpoints or duration controls. Red selector `-k 'native_dry_temperature_rejection'`; green `tests/test_panda_cc2_integration.py`; commit.
 
 ### 11. Close the generic work_on ON Dry bypass
 

@@ -1452,6 +1452,9 @@ def on_mqtt_message(client, userdata, msg):
         except ValueError: return
         last_ha_change = time.time()
         if msg.topic.endswith("/dry_temp/set"):
+            if DEVICE_TRANSPORT == "mqtt" and not pnm.DRY_TEMP_MIN <= val <= pnm.DRY_TEMP_MAX:
+                log_event(f"[DRY-SET] rejected native temperature {val!r}: requires finite 40-60 C", force_console=True)
+                return
             current_data["filament_temp"] = int(val)
             mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/dry_temp", int(val), retain=True)
             if DEVICE_TRANSPORT == "mqtt" and panda_ws is not None:
@@ -1509,6 +1512,8 @@ def setup_mqtt_discovery(client):
         ("dry_temp",   "Drying Temp",           "panda_dry_temp",       "°C",  "mdi:thermometer",   1,   80),
         ("dry_time",   "Drying Time",           "panda_dry_time",       "min", "mdi:timer-outline", 1,  480),
     ]:
+        if sfx == "dry_temp" and DEVICE_TRANSPORT == "mqtt":
+            mn, mx = pnm.DRY_TEMP_MIN, pnm.DRY_TEMP_MAX
         client.publish(f"homeassistant/number/{base}_{obj}/config", json.dumps({
             "name": name, "unique_id": f"{sn}_{obj}", "object_id": obj,
             "state_topic": f"{base}/{sfx}", "command_topic": f"{base}/{sfx}/set",

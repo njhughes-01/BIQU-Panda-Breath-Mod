@@ -2450,3 +2450,52 @@ def test_native_heat_report_rejects_obsolete_proof(tmp_path, proof, expected_hea
     assert sup.status() == before
     assert Path(mod.DRY_SESSION_FILE).read_bytes() == saved
     assert (ft.sent, ft.starts, ft.recovers, ft.stops) == writes
+
+
+def test_native_dry_temperature_rejection_is_atomic(tmp_path):
+    ft = _FakeNativeTransport()
+    mod, client, _ = _mqtt_mod(tmp_path, [ft])
+    mod.panda_ws = ft
+    mod.main_loop = MagicMock()
+    captured = []
+    with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(captured)):
+        mod.on_mqtt_message(client, None, _fake_msg("dummy/panda/dry_temp/set", "48"))
+    for coro in captured:
+        asyncio.run(coro)
+    captured.clear()
+    ft.sent.clear()
+    prior_pubs = list(_pubs(client)["dummy/panda/dry_temp"])
+    for value in ("80", "-5", "0", "39.9", "60.9", "nan", "inf", "-inf"):
+        try:
+            with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(captured)):
+                mod.on_mqtt_message(client, None, _fake_msg("dummy/panda/dry_temp/set", value))
+            assert mod.current_data["filament_temp"] == 48
+            assert _pubs(client)["dummy/panda/dry_temp"] == prior_pubs
+            assert captured == [] and ft.sent == []
+            assert _dry_session(mod) is None
+        finally:
+            for coro in captured:
+                coro.close()
+            captured.clear()
+    for value, expected in (("40", 40), ("48", 48), ("60", 60), ("48.9", 48)):
+        with patch("asyncio.run_coroutine_threadsafe", _capture_scheduler(captured)):
+            mod.on_mqtt_message(client, None, _fake_msg("dummy/panda/dry_temp/set", value))
+        for coro in captured:
+            asyncio.run(coro)
+        captured.clear()
+        assert ft.sent[-1] == {"settings": {"filament_temp": expected}}
+        assert mod.current_data["filament_temp"] == expected
+        assert _pubs(client)["dummy/panda/dry_temp"][-1] == expected
+    assert len(ft.sent) == 4 and ft.starts == [] and ft.recovers == []
+    assert _dry_session(mod) is None
+    mod.setup_mqtt_discovery(client)
+    configs = [json.loads(c.args[1]) for c in client.publish.call_args_list
+               if c.args[0].startswith("homeassistant/number/")]
+    dry = next(c for c in configs if c["object_id"] == "panda_dry_temp")
+    assert (dry["min"], dry["max"]) == (40, 60)
+    legacy, legacy_client = load_panda()
+    legacy.setup_mqtt_discovery(legacy_client)
+    configs = [json.loads(c.args[1]) for c in legacy_client.publish.call_args_list
+               if c.args[0].startswith("homeassistant/number/")]
+    dry = next(c for c in configs if c["object_id"] == "panda_dry_temp")
+    assert (dry["min"], dry["max"]) == (1, 80)
