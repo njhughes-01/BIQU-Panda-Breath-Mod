@@ -1,0 +1,6 @@
+# Design
+CC2_ACTIVE already disables the emulated TLS printer server. Both normal and emergency-lock websocket initialization nevertheless send a printer IP/SN/access binding on every connection. This is unnecessary configuration mutation in CC2 mode; sending it is observed in source, but its exact effect on the hardware timer is not yet proved.
+Gate printer binding in both initialization branches on not CC2_ACTIVE. Gate the existing get_settings request and timeout poll the same way: that request is not in the V1.0.3/V1.0.4 firmware UI or command strings. CC2 listens for the device's initial settings and temperature stream. Leave legacy emulation initialization unchanged. Explicit emergency-off remains unconditional after connection.
+Use the existing loop recorder and extend its Dry reconnect regression rather than duplicate it. Add one receive-timeout case and one parameterized emergency-lock case. Update a positional assertion that depended on the removed initialization frames. No new timer inference or native-MQTT control in this patch.
+
+Review follow-up: also gate the two get_settings requests in the WS loop heat-resume/automatic-on paths. The existing active-heating reconnect control now asserts no such poll while still requiring target55 heat and RELAY_ON.

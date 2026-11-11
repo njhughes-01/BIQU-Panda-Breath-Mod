@@ -1,0 +1,12 @@
+{
+  "_note": "Runtime configuration uses environment variables. See .env.example. This file is for reference only.",
+  "CC2_IP": "YOUR_CC2_IP",
+  "CC2_USER": "elegoo",
+  "CC2_PASS": "123456",
+  "CC2_SN": "YOUR_SERIAL_NUMBER",
+  "CC2_TOPIC_PREFIX": "cc2",
+  "HA_MQTT_BROKER": "YOUR_HA_IP",
+  "HA_MQTT_PORT": 1883,
+  "HA_MQTT_USER": "YOUR_MQTT_USER",
+  "HA_MQTT_PASS": "YOUR_MQTT_PASS"
+}

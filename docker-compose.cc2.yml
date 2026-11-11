@@ -1,0 +1,123 @@
+# CC2 full stack — Panda backend + web UI + optional cc2_connector for Elegoo Centauri Carbon 2.
+#
+# Two sub-options — choose ONE:
+#
+#   Sub-option A: cc2_connector (direct CC2 MQTT bridge, no HA integration required)
+#   ─────────────────────────────────────────────────────────────────────────────────
+#   Set CC2_IP + CC2_SN in .env.  The cc2_backend container bridges the CC2's internal
+#   MQTT broker into Home Assistant.  Start with the cc2-connector profile:
+#
+#     docker compose --profile cc2-connector up -d
+#
+#   Requirements: CC2 must be in LAN-only mode (Settings → Network → LAN Only Mode → Enable)
+#
+#   Sub-option B: elegoo-homeassistant (read CC2 data via HA REST API)
+#   ─────────────────────────────────────────────────────────────────────────────────
+#   Set CC2_HA_MODE=true + HA_TOKEN in .env.  Requires the
+#   danielcherubini/elegoo-homeassistant HA integration already installed and
+#   exposing CC2 sensors.  No cc2_connector container needed.
+#
+#     docker compose up -d
+#
+# IOT network mode (macvlan):
+#   Containers get real IPs on your IoT LAN (e.g. 10.88.88.0/24), same subnet as
+#   the CC2 and Panda Breath.  Set PANDA_BACKEND_IP to a free static IP on that
+#   subnet.  Requires an external Docker macvlan network named "IOT" on the host.
+
+services:
+  panda_backend:
+    container_name: panda_backend
+    # To pin to a specific release: image: ghcr.io/njhughes-01/biqu-panda-breath-mod:2.0.0
+    image: ghcr.io/njhughes-01/biqu-panda-breath-mod:latest
+    command: python3 Panda.py
+    restart: unless-stopped
+    networks:
+      IOT:
+        ipv4_address: ${PANDA_BACKEND_IP:-}
+    environment:
+      HA_MQTT_BROKER: ${HA_MQTT_BROKER:-mosquitto}
+      HA_MQTT_PORT: ${HA_MQTT_PORT:-1883}
+      HA_MQTT_USER: ${HA_MQTT_USER:-}
+      HA_MQTT_PASS: ${HA_MQTT_PASS:-}
+      HA_BASE_URL: ${HA_BASE_URL:-http://homeassistant:8123}
+      HA_TOKEN: ${HA_TOKEN:-}
+      PANDA_IP: ${PANDA_IP:-}
+      PANDA_SN: ${PANDA_SN:-}
+      PANDA_ACCESS_CODE: ${PANDA_ACCESS_CODE:-}
+      PANDA_HOST_IP: ${PANDA_HOST_IP:-}
+      PANDA_MQTT_TOPIC_PREFIX: ${PANDA_MQTT_TOPIC_PREFIX:-panda_breath_mod}
+      CC2_IP: ${CC2_IP:-}
+      CC2_SN: ${CC2_SN:-}
+      CC2_USER: ${CC2_USER:-elegoo}
+      CC2_PASS: ${CC2_PASS:-123456}
+      CC2_HA_MODE: ${CC2_HA_MODE:-}
+      CC2_TOPIC_PREFIX: ${CC2_TOPIC_PREFIX:-cc2}
+    volumes:
+      - panda_certs:/app/certs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  panda_web:
+    container_name: panda_web
+    # To pin to a specific release: image: ghcr.io/njhughes-01/biqu-panda-breath-mod:2.0.0
+    image: ghcr.io/njhughes-01/biqu-panda-breath-mod:latest
+    command: python3 panda_web.py
+    restart: unless-stopped
+    networks:
+      - IOT
+    environment:
+      HA_MQTT_BROKER: ${HA_MQTT_BROKER:-mosquitto}
+      HA_MQTT_PORT: ${HA_MQTT_PORT:-1883}
+      HA_MQTT_USER: ${HA_MQTT_USER:-}
+      HA_MQTT_PASS: ${HA_MQTT_PASS:-}
+      PANDA_MQTT_TOPIC_PREFIX: ${PANDA_MQTT_TOPIC_PREFIX:-panda_breath_mod}
+      PANDA_WEB_INTERNAL_PORT: 8080
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # cc2_backend is only needed for Sub-option A (direct CC2 MQTT bridge).
+  # Start with: docker compose --profile cc2-connector up -d
+  # If using CC2_HA_MODE (Sub-option B), omit the --profile flag — this service will not start.
+  cc2_backend:
+    profiles: [cc2-connector]
+    container_name: cc2_backend
+    # To pin to a specific release: image: ghcr.io/njhughes-01/biqu-panda-breath-mod:2.0.0
+    image: ghcr.io/njhughes-01/biqu-panda-breath-mod:latest
+    command: python3 cc2_connector.py
+    restart: unless-stopped
+    networks:
+      - IOT
+    environment:
+      CC2_IP: ${CC2_IP:-}
+      CC2_USER: ${CC2_USER:-elegoo}
+      CC2_PASS: ${CC2_PASS:-123456}
+      CC2_SN: ${CC2_SN:-}
+      CC2_TOPIC_PREFIX: ${CC2_TOPIC_PREFIX:-cc2}
+      HA_MQTT_BROKER: ${HA_MQTT_BROKER:-mosquitto}
+      HA_MQTT_PORT: ${HA_MQTT_PORT:-1883}
+      HA_MQTT_USER: ${HA_MQTT_USER:-}
+      HA_MQTT_PASS: ${HA_MQTT_PASS:-}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import os; os.kill(1, 0)'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  panda_certs:
+
+networks:
+  IOT:
+    external: true

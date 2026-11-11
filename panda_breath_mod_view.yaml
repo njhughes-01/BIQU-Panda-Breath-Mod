@@ -205,8 +205,8 @@ cards:
         state: "on"
     card:
       type: tile
-      entity: button.panda_breath_mod_heizung_stop
-      name: Stop Heizen
+      entity: button.panda_heat_stop
+      name: Stop Heat
       color: red
       vertical: false
       tap_action:

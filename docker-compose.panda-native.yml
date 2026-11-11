@@ -1,0 +1,90 @@
+# Opt-in overlay — DEDICATED authenticated device broker (openspec native-panda-mqtt).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.panda-native.yml config
+#   docker compose -f docker-compose.yml -f docker-compose.panda-native.yml up -d
+#
+# This overlay is ADDITIVE: the stock stack keeps using the device WebSocket,
+# and nothing here changes the HA broker, HA credentials, certs or preheat-state
+# volumes. Only when the backend is started WITH this overlay does
+# PANDA_DEVICE_TRANSPORT switch the device path to native MQTT, and the mod then
+# refuses to open a persistent device WebSocket (see docs/native-mqtt.md).
+#
+# Two broker paths, deliberately separate:
+#
+#   HA broker      HA_MQTT_BROKER:1883   mod ⇄ Home Assistant UI/telemetry only
+#   device broker  this file, host :1884  mod ⇄ Panda Breath native protocol
+#
+# No device command or state ever traverses the HA broker, and no device
+# command or state ever traverses this broker's relationship with HA. Neither
+# broker is aware of the other.
+#
+# There are NO credentials in this file. Both secret files are bind-mounted
+# from a directory OUTSIDE the repository and must be created first
+# (docs/native-mqtt.md, step 1):
+#
+#   PANDA_SECRETS_DIR/panda_device_mqtt_passwords    broker password_file (hashed)
+#   PANDA_SECRETS_DIR/panda_device_mqtt_password     the mod's client password
+#
+# The device connects to ${PANDA_DEVICE_BIND_IP}:1884 — the host port this
+# broker publishes on the device LAN only (deployment: 10.88.88.129).
+#
+# Never publish commands with retain: the broker keeps no command state.
+
+services:
+  panda_backend:
+    environment:
+      # Selects the native transport. Removing this overlay (or setting the
+      # value back to websocket) is the rollback — see docs/native-mqtt.md.
+      PANDA_DEVICE_TRANSPORT: ${PANDA_DEVICE_TRANSPORT:-mqtt}
+      # Dedicated device broker: reachable from the container at the host's
+      # device-LAN address, which is exactly where the Panda connects too.
+      PANDA_DEVICE_MQTT_HOST: ${PANDA_DEVICE_MQTT_HOST:-${PANDA_DEVICE_BIND_IP:?set PANDA_DEVICE_BIND_IP to the device-LAN host address, e.g. 10.88.88.129}}
+      PANDA_DEVICE_MQTT_PORT: ${PANDA_DEVICE_MQTT_PORT:-1884}
+      PANDA_DEVICE_MQTT_USER: ${PANDA_DEVICE_MQTT_USER:-panda_mod}
+      PANDA_DEVICE_MQTT_PASSWORD_FILE: /run/secrets/panda_device_mqtt_password
+      # Pin the device identity VERIFIED live on the broker. Do not assume a
+      # MAC-derived id before it has been seen in panda_breath/+/state output.
+      PANDA_DEVICE_MQTT_ID: ${PANDA_DEVICE_MQTT_ID:-}
+    secrets:
+      - panda_device_mqtt_password
+    # Fail closed rather than crash-looping if the device broker is absent.
+    depends_on:
+      - panda_device_mqtt
+
+  panda_device_mqtt:
+    image: eclipse-mosquitto:2
+    container_name: panda_device_mqtt
+    restart: unless-stopped
+    # Host port 1884 bound to the device-LAN address ONLY — never 0.0.0.0, and
+    # never the port the HA broker uses.
+    ports:
+      - "${PANDA_DEVICE_BIND_IP:?set PANDA_DEVICE_BIND_IP to the device-LAN host address, e.g. 10.88.88.129}:1884:1883"
+    volumes:
+      - ./deploy/panda-native-mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - panda_device_broker_data:/mosquitto/data
+    secrets:
+      - panda_device_mqtt_passwords
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      # TCP liveness of the listener only; authenticates nothing, logs nothing.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 1883 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  # Broker persistence: retained availability/state only, never commands.
+  panda_device_broker_data:
+
+secrets:
+  # Read-only, mode-0400-or-tighter files living outside the repo. The
+  # broker's hashed password_file and the mod's client password.
+  panda_device_mqtt_passwords:
+    file: ${PANDA_SECRETS_DIR:?set PANDA_SECRETS_DIR to a directory outside this repository holding the two password files}/panda_device_mqtt_passwords
+  panda_device_mqtt_password:
+    file: ${PANDA_SECRETS_DIR:?set PANDA_SECRETS_DIR to a directory outside this repository holding the two password files}/panda_device_mqtt_password

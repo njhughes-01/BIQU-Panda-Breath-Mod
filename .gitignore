@@ -1,4 +1,15 @@
 .~lock*
 .README.remote.tmp
 .README.remote.bak
+.env
+certs/
+__pycache__/
+*.pyc
+*.pyo
+panda_debug.log
 
+
+# Local runtime state; keep settings/session data out of commits.
+/preheat_state.json
+/drying_session.json
+/dry_state/
