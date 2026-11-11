@@ -1456,7 +1456,7 @@ def test_heat_evidence_cannot_survive_stop_or_gap(interruption):
         await asyncio.sleep(0)
         assert tr.heating_status == 'confirmed'
         # No simulated readback for the stop: broker delivery cannot prove OFF.
-        client.publish = lambda topic, payload=None, **kw: (client.published.append((topic, payload, kw)) or FakePublish())
+        client.publish = lambda topic, payload=None, qos=0, retain=False: (client.published.append((topic, payload, {'qos': qos, 'retain': retain})) or FakePublish())
         if interruption == 'stop':
             assert await advance_clock_during(tr.stop_supervised(), clock) == 'uncertain'
         elif interruption == 'send_stop':
