@@ -113,8 +113,8 @@ For each material correction: write the focused reproducer first, retain its exp
 **Files:** `drying_supervisor.py`, `tests/test_drying_supervisor.py`.
 **Interface:** same `status()` dict and inhibit vocabulary, pure diagnostic observation.
 
-- [ ] Add `test_status_clock_diagnostic_is_observational`: valid fake-clock armed session before deadline reports None; invalid clock reports clock unusable; true monotonic regression reports regression; elapsed deadline reports deadline elapsed. No-session and persistence-error priorities stay intact. Snapshot state file bytes, `_last_mono`, deadline anchors and observation counters before/after repeated status calls and require equality. Operational tick/expiry/cancel regressions remain green.
-- [ ] Sample clocks defensively for `_inhibit_reason` without calling the mutating `_clock_state()` or persisting. Do not make diagnostics clear errors. Red selector `-k 'status_clock_diagnostic'`; green `tests/test_drying_supervisor.py`; commit.
+- [x] Add `test_status_clock_diagnostic_is_observational`: valid fake-clock armed session before deadline reports None; invalid clock reports clock unusable; true monotonic regression reports regression; elapsed deadline reports deadline elapsed. No-session and persistence-error priorities stay intact. Snapshot state file bytes, `_last_mono`, deadline anchors and observation counters before/after repeated status calls and require equality. Operational tick/expiry/cancel regressions remain green.
+- [x] Sample clocks defensively for `_inhibit_reason` without calling the mutating `_clock_state()` or persisting. Do not make diagnostics clear errors. Red selector `-k 'status_clock_diagnostic'`; green `tests/test_drying_supervisor.py`; commit.
 
 ### 13. Correct materially misleading help and operational descriptions
 

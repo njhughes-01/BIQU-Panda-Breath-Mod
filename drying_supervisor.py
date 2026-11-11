@@ -287,6 +287,18 @@ class DryingSupervisor:
     def status(self) -> dict:
         """Plain dict copy of the session for telemetry (never the live record)."""
         s = self._state
+        # Diagnostic samples only: do not advance the operational high-water
+        # mark, anchor a deadline, persist, or clear errors from a status read.
+        try:
+            now = float(self._clock())
+        except Exception:
+            now = float("nan")
+        try:
+            mono = float(self._monotonic())
+        except Exception:
+            mono = float("nan")
+        drift = (_is_finite_number(mono) and self._last_mono is not None
+                 and mono < self._last_mono)
         return {
             "status": s["status"] if s else "inactive",
             "session_id": s["session_id"] if s else None,
@@ -294,7 +306,7 @@ class DryingSupervisor:
             "deadline": s["deadline"] if s else None,
             "pending_stop": bool(s and s["pending_stop"]),
             "recovering": bool(s and s["recovering"]),
-            "inhibit": self._inhibit_reason(),
+            "inhibit": self._inhibit_reason(drift, now, mono),
         }
 
     # ── periodic service ─────────────────────────────────────────────────────

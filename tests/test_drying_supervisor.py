@@ -568,3 +568,49 @@ def test_cancel_remains_durable_after_older_save_finishes(tmp_path, monkeypatch)
     restored = DryingSupervisor(path).status()
     assert restored["status"] == "cancelled"
     assert restored["pending_stop"] is True
+
+
+def test_status_clock_diagnostic_is_observational(tmp_path, monkeypatch):
+    async def scenario():
+        sup, clock, mono = make_sup(tmp_path)
+        assert sup.arm(50, 1)
+        tr = FakeTransport()
+        tr.push(running=True)
+        await tick(sup, tr)  # establishes the operational monotonic high-water mark
+
+        def snapshot():
+            return (Path(sup.path).read_bytes(), dict(sup._state), sup._last_mono,
+                    sup._deadline_mono, sup._off_count, sup._last_off_seq,
+                    sup._gate_seq, sup._last_attempt_mono, sup._recover_task,
+                    sup._observed_transport())
+
+        # Valid observations above the high-water mark must not advance it.
+        for wall, monotonic, reason in (
+                (1001, 1001, None), (float("nan"), 1001, "clock unusable"),
+                (1001, float("nan"), "clock unusable"),
+                (1001, 999, "monotonic clock regression"),
+                (4600, 1001, "deadline elapsed"), (1001, 4600, "deadline elapsed")):
+            clock.t, mono.t = wall, monotonic
+            before = snapshot()
+            for _ in range(3):
+                assert sup.status()["inhibit"] == reason
+                assert snapshot() == before
+
+        def unusable():
+            raise RuntimeError("synthetic unavailable clock")
+
+        clock.t, mono.t = 1001, 1001
+        with monkeypatch.context() as m:
+            m.setattr(sup, "_clock", unusable)
+            before = snapshot()
+            assert sup.status()["inhibit"] == "clock unusable"
+            assert snapshot() == before
+        sup._persist_error = True
+        before = snapshot()
+        assert sup.status()["inhibit"] == "persistence unavailable"
+        assert sup._persist_error is True and snapshot() == before
+        empty = DryingSupervisor(tmp_path / "absent.json", clock=unusable, monotonic=unusable)
+        assert empty.status()["inhibit"] == "no session"
+        assert not (tmp_path / "absent.json").exists()
+    from pathlib import Path
+    asyncio.run(scenario())
