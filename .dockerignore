@@ -10,3 +10,7 @@ __pycache__/
 screenshots/
 *.png
 *.doc
+/preheat_state.json
+/drying_session.json
+/dry_state/
+/.drying_session.*
