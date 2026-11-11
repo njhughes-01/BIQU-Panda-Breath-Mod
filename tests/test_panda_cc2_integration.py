@@ -136,7 +136,9 @@ def test_cc2_supported_filament_aliases_have_chamber_targets():
     expected = {
         "PLA-CF": 0,
         "PET": 35,
-        "PETG-CF": 35,
+        "PETG": 0,
+        "PETG-CF": 0,
+        "PETG-GF": 0,
         "ABS-GF": 55,
         "ASA-GF": 55,
         "NYLON": 65,
@@ -148,6 +150,16 @@ def test_cc2_supported_filament_aliases_have_chamber_targets():
         resolved, match = mod._resolve_filament_chamber_target(filament)
         assert resolved == target, filament
         assert match == filament
+
+
+def test_petg_does_not_use_unknown_material_fallback():
+    mod, client = load_panda(cc2_ip="192.168.1.50")
+    mod.mqtt_client = client
+    mod.CC2_HA_FALLBACK_TEMP = 45
+    mod.current_data.update(cc2_print_status="idle", chamber_setpoint=0.0,
+                            cc2_pending_filament="PETG")
+    mod._handle_cc2_data("print_status", "preheating")
+    assert mod.current_data["chamber_setpoint"] == 0
 
 
 def test_cc2_target_delta_ignores_panda_overshoot_temp():
