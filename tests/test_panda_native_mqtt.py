@@ -1506,3 +1506,28 @@ def test_heat_evidence_cannot_survive_stop_or_gap(interruption):
         assert tr.heating_evidence_status() == 'confirmed'
         await stop_transport(tr)
     asyncio.run(scenario())
+
+
+def test_direct_dry_temperature_bounds():
+    async def scenario():
+        tr, client, clock = await connected_transport()
+        for value in (80, 0, -5, 39.9, 60.9, float("nan"), float("inf"), float("-inf"), True):
+            for envelope in ({"filament_temp": value}, {"work_on": True, "filament_temp": value}):
+                before = list(client.published)
+                assert await one_send(tr, envelope) is False
+                assert client.published == before
+        for value, expected in ((40, 40), (48, 48), (60, 60), (48.9, 48)):
+            client.published.clear()
+            assert await one_send(tr, {"filament_temp": value})
+            assert [(topic, json.loads(payload), kw) for topic, payload, kw in client.published] == [
+                (CMD, {"custom_temp": expected}, {"qos": 0, "retain": False})]
+        # Out-of-range telemetry remains visible: it must not hide a fresh OFF.
+        client.fire_state(full_state(custom_temp=80))
+        await asyncio.sleep(0)
+        assert tr.drying_snapshot()[1]["custom_temp"] == 80
+        client.published.clear()
+        assert await one_send(tr, {"work_on": False, "isrunning": 0})
+        assert [json.loads(payload) for _, payload, _ in client.published] == [
+            {"work_on": "OFF"}, {"drying_running": "OFF"}]
+        await stop_transport(tr)
+    asyncio.run(scenario())

@@ -527,7 +527,7 @@ class NativePandaTransport:
                     return None
                 out["heater_temp"] = str(_native_num_str(val))
             elif key == "filament_temp":
-                if not _is_finite_number(val):
+                if not _is_finite_number(val) or not DRY_TEMP_MIN <= val <= DRY_TEMP_MAX:
                     return None
                 out["custom_temp"] = str(int(val))
             elif key == "filament_timer":

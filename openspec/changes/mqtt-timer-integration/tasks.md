@@ -88,8 +88,8 @@ For each material correction: write the focused reproducer first, retain its exp
 **Files:** `panda_native_mqtt.py`, `tests/test_panda_native_mqtt.py`.
 **Interface:** existing `send()`/`_translate()` return False/None for invalid filament_temp, atomically.
 
-- [ ] Add `test_direct_dry_temperature_bounds`: send filament_temp 80, 0, -5, 39.9, 60.9, nonfinite values and bool with fresh valid telemetry; expect False and zero publishes, including a mixed envelope with work_on. Test valid 40/48/60 (and retained in-range fractional truncation behavior) emits only custom_temp. No timer or mode change. Existing stale/retained controls still reject ordinary writes.
-- [ ] Bound the numeric value before integer conversion; do not tighten incoming telemetry normalization. A received custom_temp=80 must remain visible so fresh OFF/Stop can still be observed. Red selector `-k 'direct_dry_temperature_bounds'`, green `tests/test_panda_native_mqtt.py`; commit.
+- [x] Add `test_direct_dry_temperature_bounds`: send filament_temp 80, 0, -5, 39.9, 60.9, nonfinite values and bool with fresh valid telemetry; expect False and zero publishes, including a mixed envelope with work_on. Test valid 40/48/60 (and retained in-range fractional truncation behavior) emits only custom_temp. No timer or mode change. Existing stale/retained controls still reject ordinary writes.
+- [x] Bound the numeric value before integer conversion; do not tighten incoming telemetry normalization. A received custom_temp=80 must remain visible so fresh OFF/Stop can still be observed. Red selector `-k 'direct_dry_temperature_bounds'`, green `tests/test_panda_native_mqtt.py`; commit.
 
 ### 10. Reject invalid native selected temperature before local acceptance
 
