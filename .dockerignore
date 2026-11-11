@@ -1,0 +1,12 @@
+.env
+certs/
+panda_config.json
+panda_debug.log
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+screenshots/
+*.png
+*.doc
