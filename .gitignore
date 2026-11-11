@@ -8,3 +8,8 @@ __pycache__/
 *.pyo
 panda_debug.log
 
+
+# Local runtime state; keep settings/session data out of commits.
+/preheat_state.json
+/drying_session.json
+/dry_state/

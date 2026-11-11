@@ -14,7 +14,8 @@ unchanged.
 Use the existing drying controls exactly as before:
 
 - HA dry button press — starts with the drying temperature/time currently
-  shown in the mod (`dry_temp` 40–60 °C, `dry_time` whole hours 1–99).
+  shown in the mod (`dry_temp` 40–60 °C; `dry_time` is displayed in minutes
+  and must represent whole hours, 1–99).
 - JSON press to `<prefix>/drying/set` —
   `{"temperature_c": 50, "duration_hours": 8}` (whole hours are canonical).
 
@@ -104,4 +105,8 @@ Existing `dry_start_status` and `dry_heating_confirmed` topics are unchanged.
   recreated. This is documented, not pre-configured — live deployment is a
   separate approval.
 - Packaging: the production Dockerfile copies the whole directory
-  (`COPY . .`), so `drying_supervisor.py` ships with no Dockerfile change.
+  (`COPY . .`), including `drying_supervisor.py`, and prepares a writable
+  `/app/dry_state` for the non-root runtime user.
+
+The approved deployment and completed live cycle are recorded in
+[Panda findings, 2026-11-11](panda-findings-20261111.md).
