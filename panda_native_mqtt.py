@@ -462,15 +462,15 @@ class NativePandaTransport:
         cmds = self._translate(settings)
         if cmds is None:
             return False                       # rejected atomically: nothing published
-        if settings.get("isrunning") in (0, False) or settings.get("work_on") in (0, False):
+        stop_command = any((k == "work_on" and v == "OFF") or
+                           (k == "drying_running" and v == "OFF") for k, v in cmds)
+        if stop_command or settings.get("isrunning") in (0, False) or settings.get("work_on") in (0, False):
             self._invalidate_heating_evidence()
         if not cmds:
             return True                        # mapping chose to skip (generic no-op)
         if not self._broker_connected or self._client is None:
             self._log("[NATIVE-MQTT] broker offline — command dropped, not queued")
             return False
-        stop_command = any((k == "work_on" and v == "OFF") or
-                           (k == "drying_running" and v == "OFF") for k, v in cmds)
         if not stop_command and not self.available:
             self._log("[NATIVE-MQTT] ordinary write rejected: device state stale/offline")
             return False

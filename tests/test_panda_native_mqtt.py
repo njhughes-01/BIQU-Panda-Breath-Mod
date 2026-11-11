@@ -1446,7 +1446,7 @@ def test_heat_evidence_ends_with_dry_episode(ending, prove_first):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('interruption', ['stop', 'send_stop', 'disconnect', 'availability', 'gap'])
+@pytest.mark.parametrize('interruption', ['stop', 'send_stop', 'send_mode_stop', 'disconnect', 'availability', 'gap'])
 def test_heat_evidence_cannot_survive_stop_or_gap(interruption):
     async def scenario():
         tr, client, clock = await connected_transport()
@@ -1461,6 +1461,11 @@ def test_heat_evidence_cannot_survive_stop_or_gap(interruption):
             assert await advance_clock_during(tr.stop_supervised(), clock) == 'uncertain'
         elif interruption == 'send_stop':
             assert await one_send(tr, {'work_on': False, 'isrunning': 0})
+        elif interruption == 'send_mode_stop':
+            assert await one_send(tr, {'work_mode': 0})
+            assert tr.heating_status != 'confirmed'
+            assert tr.heating_evidence_status() == 'none'
+            assert tr.drying_snapshot()[1]['drying_running'] == 'ON'
         elif interruption == 'disconnect':
             client.fire_disconnect()
             await asyncio.sleep(0)
