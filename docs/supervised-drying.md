@@ -19,6 +19,10 @@ Use the existing drying controls exactly as before:
 - JSON press to `<prefix>/drying/set` —
   `{"temperature_c": 50, "duration_hours": 8}` (whole hours are canonical).
 
+That JSON describes the interface, not permission to run another cycle. The
+previously authorized 50°C/eight-hour cycle is complete; its findings do not
+authorize another start.
+
 Before anything is armed the mod requires **fresh live device telemetry with
 drying OFF** (a device reporting drying running is refused; a stale countdown
 number alone does not count as running). Arming only writes the session file —
@@ -65,9 +69,10 @@ Any of these cancels the session permanently (the cancellation is persisted
 before a device command is requested, and a cancelled session never rearms):
 
 - mod **Stop / heat-stop button** (emergency stop and lock)
-- **Panda power OFF** switch
-- **work_on OFF**
+- mod **Panda power OFF** switch
+- mod **work_on OFF** control
 - any **mode change** (Manual, Automatic, or the mode-select dropdown)
+- a mod lock
 
 The **Panda's physical OFF button alone does not cancel** — that stop is
 restarted automatically, as authorized. If a cancellation Stop cannot be
@@ -84,14 +89,29 @@ New retained topic: `<prefix>/dry_session`, JSON, mirrored when it changes:
  "recovering": false}
 ```
 
-Existing `dry_start_status` and `dry_heating_confirmed` topics are unchanged.
+`running` here means an armed timer session, not proof of physical heating.
+The supervisor owns the initial start as well as recovery; ordinary reconnect
+alone cannot arm a session. Existing `dry_start_status` uses `idle`,
+`confirming`, `confirmed`, `failed` or `uncertain`, never `started`.
+`dry_heating_confirmed` separately uses `none`, `pending`, `confirmed`,
+`at_target` or `unconfirmed`. A confirmed timer is not heating proof;
+`at_target` means the temperature was already at target. An owed Stop is not
+confirmed physical OFF until fresh device telemetry confirms it.
+
+Arming logs `[DRY-SUP] armed ...` / `>>> DRY SUPERVISED: ...`; the supervisor
+logs `[DRY-SUP] recovery start confirmed by device readback` for a confirmed
+initial or recovery start. Do not expect the old direct-start log. A transient
+configuration-readback lag remains an unproven lead, not an established cause
+of the historical startup trouble or a change made by this integration.
 
 ## State file and deployment
 
 - Path: `PANDA_DRY_SESSION_FILE`, default `<install dir>/drying_session.json`
   (next to the preheat state file). It is runtime state, never repo content.
-- A backend restart with the same container resumes the session from this
-  file. A deployment that **recreates** the container must give the file a
+- A backend restart loads the persisted session from this file; recovery still
+  requires the fresh-state and uncertainty guards above and retains the same
+  deadline. Cancelled/completed sessions never rearm; an owed Stop survives.
+  A deployment that **recreates** the container must give the file a
   persistent home, e.g. add a volume and point the env at it:
 
   ```yaml
@@ -102,11 +122,29 @@ Existing `dry_start_status` and `dry_heating_confirmed` topics are unchanged.
   ```
 
   Without such a mount, an armed session is lost when the container is
-  recreated. This is documented, not pre-configured — live deployment is a
-  separate approval.
+  recreated. The reusable stock native overlay does not provision this volume;
+  its operator must do so. The deployment recorded in the findings **already
+  has** `panda_panda_dry_state` mounted at `/app/dry_state` and the session env
+  path set as above. Preserve that volume and the existing settings, secrets,
+  preheat persistence and entrypoint/configuration bypass on recreation.
 - Packaging: the production Dockerfile copies the whole directory
   (`COPY . .`), including `drying_supervisor.py`, and prepares a writable
-  `/app/dry_state` for the non-root runtime user.
+  `/app/dry_state` for the non-root runtime user. `.dockerignore` excludes local
+  preheat/session files, the runtime state directory and atomic-write remnants;
+  runtime intent must come from the deployment's persistence, not an image.
+
+## Rollback for the supervised deployment
+
+Use the [native MQTT rollback procedure](native-mqtt.md#step-5--supervised-image-rollback)
+and parent-owned task 6 in the
+[integration plan](../openspec/changes/mqtt-timer-integration/tasks.md).
+Restore the captured prior supervised image `panda-supervised:20261110-reviewed`
+at its verified image ID with the prior effective Compose configuration,
+changing only the backend image and retaining **current** settings and state.
+Defer recreation for a running/recovering session or pending Stop; require a
+naturally terminal session and fresh confirmed OFF. Never roll back runtime
+session data, drop the native overlay, switch to the pre-supervisor image,
+remove volumes or start a new cycle to verify rollback.
 
 The approved deployment and completed live cycle are recorded in
 [Panda findings, 2026-11-11](panda-findings-20261111.md).
